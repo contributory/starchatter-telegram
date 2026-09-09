@@ -1,7 +1,5 @@
 """Provider callback handler for AI provider management."""
 
-import re
-
 from pyrogram import Client, enums, filters, types
 from sqlalchemy import select
 
@@ -39,9 +37,17 @@ async def provider_page_handler(client: Client, callback_query: types.CallbackQu
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def provider_back_handler(client: Client, callback_query: types.CallbackQuery):
-    """Handle back to providers list callback"""
+    """Handle back to admin panel from providers list"""
+    from app.handlers.admin.admin_callbacks import ADMIN_PANEL_TEXT, _build_admin_panel_keyboard
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
-    await show_providers_list(client, callback_query.message, 0, force_cloud=False)
+    try:
+        await callback_query.message.edit_text(
+            ADMIN_PANEL_TEXT,
+            reply_markup=_build_admin_panel_keyboard(),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
     await callback_query.answer()
 
 
@@ -50,10 +56,11 @@ async def provider_back_handler(client: Client, callback_query: types.CallbackQu
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def provider_close_handler(client: Client, callback_query: types.CallbackQuery):
-    """Handle close providers list callback"""
-    await callback_query.message.delete()
-    if callback_query.message.reply_to_message:
-        await callback_query.message.reply_to_message.delete()
+    """Handle close providers list - delete current message only"""
+    try:
+        await callback_query.message.delete()
+    except Exception:
+        pass
     await callback_query.answer()
 
 
@@ -66,13 +73,11 @@ async def provider_number_handler(client: Client, callback_query: types.Callback
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
     provider_num = int(parts[1])
-    # Get all providers to calculate which one was selected
     result = await read_db.execute(select(AIProvider))
     providers = result.scalars().all()
 
     if 1 <= provider_num <= len(providers):
         provider = providers[provider_num - 1]
-        # Show provider actions for this specific provider
         await show_provider_actions(
             client, callback_query.message, provider, force_cloud=False
         )
@@ -100,11 +105,12 @@ async def provider_select_handler(client: Client, callback_query: types.Callback
         await callback_query.answer("Provider not found!", show_alert=True)
         return
 
-    # Set provider as default (write via cloud)
     await write_db.set_default_provider(provider)
     await callback_query.answer(
-        f"Provider `{provider.name}` is now default!", show_alert=True
+        f"✅ Provider `{provider.name}` is now default!", show_alert=True
     )
+    # Refresh provider actions view
+    await show_provider_actions(client, callback_query.message, provider, force_cloud=False)
 
 
 @Client.on_callback_query(
@@ -160,9 +166,8 @@ async def provider_delete_handler(client: Client, callback_query: types.Callback
         await callback_query.answer("Provider not found!", show_alert=True)
         return
 
-    # Delete provider (write via cloud)
     await write_db.delete(provider)
-    await callback_query.answer(f"Provider `{provider.name}` deleted!", show_alert=True)
+    await callback_query.answer(f"🗑️ Provider `{provider.name}` deleted!", show_alert=True)
     await show_providers_list(client, callback_query.message, 0, force_cloud=False)
 
 
@@ -185,7 +190,6 @@ async def provider_models_handler(client: Client, callback_query: types.Callback
         await callback_query.answer("Provider not found!", show_alert=True)
         return
 
-    # Initial models view
     await show_provider_models(
         client, callback_query.message, provider.id, provider.name, 0
     )
@@ -241,7 +245,6 @@ async def provider_models_back_handler(
         await callback_query.answer("Provider not found!", show_alert=True)
         return
 
-    # Back from models to provider actions
     await show_provider_actions(
         client, callback_query.message, provider, force_cloud=False
     )
@@ -272,31 +275,27 @@ async def provider_models_select_handler(
 
     all_models = await get_provider_models(provider=provider)
 
-    # Check if models list is empty
     if not all_models:
         await callback_query.answer("No models available!", show_alert=True)
         return
 
-    # Validate model number (1-based indexing)
-    # Convert from 1-based to 0-based indexing
     actual_model_index = model_index - 1
     selected_model = all_models[actual_model_index]
-    # Save selected model to database
     await write_db.set_default_model("chat", provider.name, selected_model)
     await write_db.set_default_provider(provider)
-    await callback_query.answer(f"Selected model: `{selected_model}`", show_alert=True)
+    await callback_query.answer(f"✅ Selected model: `{selected_model}`", show_alert=True)
     await show_provider_actions(client, callback_query.message, provider)
     await callback_query.answer()
 
 
+# ==================== Helper Functions ====================
+
 async def show_providers_list(
     client: Client, message: types.Message, page: int = 0, force_cloud: bool = False
 ):
-    """Display providers list with pagination."""
-
+    """Display providers list with pagination using edit_text."""
     result = await read_db.execute(select(AIProvider))
     providers = result.scalars().all()
-    # Use cloud database if force_cloud is True to get the latest default provider
     default_provider = await (
         cloud_db.get_default_provider()
         if force_cloud
@@ -304,38 +303,30 @@ async def show_providers_list(
     )
 
     if not providers:
-        # Check if this is a reply to a command message
-        if hasattr(message, "reply_to_message") and message.reply_to_message:
-            await message.reply_to_message.reply(
-                "No providers yet. Add a provider using:\n"
-                "`/add_provider <name> <base_url> <api_key>`"
-            )
-            await message.delete()
-        else:
+        try:
             await message.edit_text(
-                "No providers yet. Add a provider using:\n"
-                "`/add_provider <name> <base_url> <api_key>`"
+                "**⚠️ No Providers**\n\n"
+                "Add a provider using:\n"
+                "`/add_provider <name> <base_url> <api_key>`",
             )
+        except Exception:
+            pass
         return
 
-    # Prepare providers list with (id, name) tuples
     providers_list = [(p.id, p.name) for p in providers]
-
-    # Calculate pagination
     total_pages = max(1, (len(providers_list) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
     start_idx = page * ITEMS_PER_PAGE
     end_idx = min(start_idx + ITEMS_PER_PAGE, len(providers_list))
     page_providers = providers_list[start_idx:end_idx]
 
-    # Create keyboard with numbered buttons
     markup = create_providers_keyboard(
         providers=page_providers,
         page=page,
         callback_prefix="provider",
         total_pages=total_pages,
+        back_callback="provider/back",
     )
 
-    # Build message with provider names and numbers
     start_num = page * ITEMS_PER_PAGE + 1
     provider_names = []
     for i, (provider_id, provider_name) in enumerate(page_providers):
@@ -345,11 +336,17 @@ async def show_providers_list(
         provider_names.append(f"`{num}`. {prefix}`{provider_name}`")
 
     providers_text = "\n".join(provider_names)
-    new_text = f"**AI Providers** (Page {page + 1}/{total_pages})\n\n{providers_text}\n\nTap a number to select provider."
+    new_text = (
+        f"**🤖 AI Providers** (Page {page + 1}/{total_pages})\n\n"
+        f"{providers_text}\n\n"
+        f"Tap a number to select provider."
+    )
 
-    # Check if message unchanged, skip edit_text call
-    if message.text != new_text or str(message.reply_markup) != str(markup):
-        await message.edit_text(new_text, reply_markup=markup)
+    try:
+        if message.text != new_text or str(message.reply_markup) != str(markup):
+            await message.edit_text(new_text, reply_markup=markup)
+    except Exception:
+        pass
 
 
 async def show_provider_actions(
@@ -358,62 +355,58 @@ async def show_provider_actions(
     provider: AIProvider,
     force_cloud: bool = False,
 ):
-    """Display action buttons for a specific provider."""
-
+    """Display action buttons for a specific provider using edit_text."""
     default_provider = await (
         cloud_db.get_default_provider()
         if force_cloud
         else read_db.get_default_provider()
     )
 
-    # Create action buttons for this provider
     buttons = [
         [
             types.InlineKeyboardButton(
-                text=f"🔹 {provider.name}",
-                callback_data="noop",
+                text=f"🔹 {provider.name}", callback_data="noop"
             )
         ],
         [
             types.InlineKeyboardButton(
-                text="✅ Select",
-                callback_data=f"provider/select/{provider.id}",
+                text="✅ Select", callback_data=f"provider/select/{provider.id}"
             ),
             types.InlineKeyboardButton(
-                text="✏️ Edit",
-                callback_data=f"provider/edit/{provider.id}",
+                text="✏️ Edit", callback_data=f"provider/edit/{provider.id}"
             ),
         ],
         [
             types.InlineKeyboardButton(
-                text="🤖 Models",
-                callback_data=f"provider/models_/{provider.id}",
+                text="🤖 Models", callback_data=f"provider/models_/{provider.id}"
             ),
             types.InlineKeyboardButton(
-                text="🗑️ Delete",
-                callback_data=f"provider/delete/{provider.id}",
+                text="🗑️ Delete", callback_data=f"provider/delete/{provider.id}"
             ),
         ],
         [
             types.InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data="provider/back",
+                text="⬅️ Back to Providers", callback_data="provider/back"
             ),
         ],
     ]
     markup = types.InlineKeyboardMarkup(buttons)
 
-    # Build message
     is_default = default_provider and provider.id == default_provider.id
     status = " ⭐ (Default)" if is_default else ""
 
-    await message.edit_text(
-        f"**Provider: {provider.name}**{status}\n\n"
-        f"URL: `{provider.base_url}`\n"
-        f"API Key: `{provider.api_key[:10]}...`\n\n"
-        f"Use buttons below to manage this provider.",
-        reply_markup=markup,
+    new_text = (
+        f"**🤖 Provider: {provider.name}**{status}\n\n"
+        f"**URL:** `{provider.base_url}`\n"
+        f"**API Key:** `{provider.api_key[:10]}...`\n\n"
+        f"Use buttons below to manage this provider."
     )
+
+    try:
+        if message.text != new_text or str(message.reply_markup) != str(markup):
+            await message.edit_text(new_text, reply_markup=markup)
+    except Exception:
+        pass
 
 
 async def show_provider_models(
@@ -423,8 +416,7 @@ async def show_provider_models(
     provider_name: str,
     page: int,
 ):
-    """Display models list of a provider with pagination using numbered buttons."""
-    # Get provider object by ID
+    """Display models list of a provider with pagination using edit_text."""
     result = await read_db.execute(
         select(AIProvider).where(AIProvider.id == provider_id)
     )
@@ -432,39 +424,36 @@ async def show_provider_models(
 
     if not provider_object:
         buttons = [
-            [
-                types.InlineKeyboardButton(
-                    text="⬅️ Back",
-                    callback_data="provider/back",
-                ),
-            ],
+            [types.InlineKeyboardButton(text="⬅️ Back", callback_data="provider/back")],
         ]
         markup = types.InlineKeyboardMarkup(buttons)
-        await message.edit_text(
-            "**Error**\n\nProvider not found!",
-            reply_markup=markup,
-        )
+        try:
+            await message.edit_text(
+                "**⚠️ Error**\n\nProvider not found!",
+                reply_markup=markup,
+            )
+        except Exception:
+            pass
         return
 
     all_models = await get_provider_models(provider=provider_object)
 
-    # Handle empty models list
     if not all_models:
         buttons = [
-            [
-                types.InlineKeyboardButton(
-                    text="⬅️ Back",
-                    callback_data=f"provider/models_/{provider_id}/back",
-                )
-            ]
+            [types.InlineKeyboardButton(
+                text="⬅️ Back", callback_data=f"provider/models_/{provider_id}/back"
+            )]
         ]
         markup = types.InlineKeyboardMarkup(buttons)
-        await message.edit_text(
-            f"**Models for {provider_name}**\n\n"
-            f"No models available.\n\n"
-            f"Please check your provider settings or API connection.",
-            reply_markup=markup,
-        )
+        try:
+            await message.edit_text(
+                f"**🤖 Models for {provider_name}**\n\n"
+                f"No models available.\n\n"
+                f"Please check your provider settings or API connection.",
+                reply_markup=markup,
+            )
+        except Exception:
+            pass
         return
 
     total_pages = max(1, (len(all_models) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
@@ -472,15 +461,14 @@ async def show_provider_models(
     end_idx = min(start_idx + ITEMS_PER_PAGE, len(all_models))
     page_models = all_models[start_idx:end_idx]
 
-    # Create numbered keyboard
     markup = create_models_keyboard(
         models=page_models,
         page=page,
         callback_prefix=f"provider_models_select/{provider_id}",
         total_pages=total_pages,
+        back_callback=f"provider/models_/{provider_id}/back",
     )
 
-    # Build message with model names
     start_num = page * ITEMS_PER_PAGE + 1
     model_names = []
     for i, model in enumerate(page_models):
@@ -489,9 +477,14 @@ async def show_provider_models(
 
     models_text = "\n".join(model_names)
 
-    await message.edit_text(
-        f"**Models for {provider_name}** (Page {page + 1}/{total_pages})\n\n"
+    new_text = (
+        f"**🤖 Models for {provider_name}** (Page {page + 1}/{total_pages})\n\n"
         f"{models_text}\n\n"
-        f"Tap a number to select model.",
-        reply_markup=markup,
+        f"Tap a number to select model."
     )
+
+    try:
+        if message.text != new_text or str(message.reply_markup) != str(markup):
+            await message.edit_text(new_text, reply_markup=markup)
+    except Exception:
+        pass

@@ -1,129 +1,106 @@
-"""Menu command handler with inline keyboard buttons - Updated for admin panel."""
+"""Menu command handler with inline keyboard buttons."""
 
 from app.handlers.owner import is_user_owner
 from pyrogram import Client, enums, filters, types
 
-from app.database.local import local_db
+
+def _build_menu_keyboard() -> types.InlineKeyboardMarkup:
+    """Build main menu inline keyboard."""
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="🤖 Providers", callback_data="menu:providers"
+            ),
+            types.InlineKeyboardButton(
+                text="🔧 MCP Servers", callback_data="menu:mcp_servers"
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="⚙️ Models", callback_data="menu:models"
+            ),
+            types.InlineKeyboardButton(
+                text="🛠️ Tools", callback_data="menu:tools"
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="❌ Close", callback_data="menu:close"
+            ),
+        ],
+    ]
+    return types.InlineKeyboardMarkup(keyboard)
+
+
+MENU_TEXT = (
+    "**📱 Main Menu**\n\n"
+    "Choose an option:\n\n"
+    "🤖 **Providers** - Manage AI providers\n"
+    "🔧 **MCP Servers** - Manage MCP servers\n"
+    "⚙️ **Models** - Configure models\n"
+    "🛠️ **Tools** - Manage tools\n\n"
+    "Use /help for available commands."
+)
 
 
 @Client.on_message(filters.command("menu"))  # type: ignore
 async def menu_handler(client: Client, message: types.Message):
     """Show main menu with action buttons"""
     await message.reply_chat_action(enums.ChatAction.TYPING)
-    
-    # Create inline keyboard with menu buttons
-    keyboard = [
-        [
-            types.InlineKeyboardButton(
-                text="🤖 Providers",
-                callback_data="admin:providers"
-            ),
-            types.InlineKeyboardButton(
-                text="🔧 MCP Servers",
-                callback_data="admin:mcp_servers"
-            ),
-        ],
-        [
-            types.InlineKeyboardButton(
-                text="⚙️ Models",
-                callback_data="admin:models"
-            ),
-            types.InlineKeyboardButton(
-                text="🛠️ Tools",
-                callback_data="admin:system_tools"
-            ),
-        ],
-        [
-            types.InlineKeyboardButton(
-                text="❌ Close",
-                callback_data="menu:close"
-            ),
-        ],
-    ]
-    
-    markup = types.InlineKeyboardMarkup(keyboard)
-    
-    menu_text = """**📱 Main Menu**
-
-Choose an option:
-
-🤖 **Providers** - Manage AI providers
-🔧 **MCP Servers** - Manage MCP servers  
-⚙️ **Models** - Configure models
-🛠️ **Tools** - Manage tools
-
-Use /help for available commands.
-"""
-    
     await message.reply(
-        menu_text,
-        reply_markup=markup,
+        MENU_TEXT,
+        reply_markup=_build_menu_keyboard(),
         quote=True,
         parse_mode=enums.ParseMode.MARKDOWN,
     )
 
 
 @Client.on_callback_query(
-    filters.create(lambda _, __, cbq: cbq.data.startswith("menu/"))  # type: ignore
+    filters.regex(r"^menu:(.+)$")  # type: ignore
 )
 async def menu_callback_handler(client: Client, callback_query: types.CallbackQuery):
-    """Handle menu button callbacks"""
-    from app.handlers.providers_command import providers_handler
-    from app.handlers.models_command import models_handler
-    
+    """Handle menu button callbacks - uses edit_text for smooth navigation"""
     data = callback_query.data
-    action = data.split("/")[1] if "/" in data else ""
+    action = data.split(":")[1] if ":" in data else ""
     
-    # Check if user is owner
+    if action == "close":
+        # Delete the menu message
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
+        await callback_query.answer()
+        return
+    
+    # Check if user is owner for all other actions
     if not is_user_owner(callback_query.from_user.id):
         await callback_query.answer("❌ Only owners can use this menu.", show_alert=True)
         return
     
-    if action == "close":
-        await callback_query.message.delete()
-        return
+    await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     
-    elif action == "providers":
-        await callback_query.answer("Opening providers menu...")
-        await callback_query.message.delete()
-        # Forward to providers handler
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-            text="/providers",
-        )
-        await providers_handler(client, fake_message, page=0)
+    if action == "providers":
+        from app.handlers.provider_callbacks import show_providers_list
+        await show_providers_list(client, callback_query.message, 0, force_cloud=False)
+        await callback_query.answer()
         
     elif action == "mcp_servers":
-        await callback_query.answer("Opening MCP servers menu...")
-        await callback_query.message.delete()
-        # Forward to mcp_servers handler
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-        )
         from app.handlers.mcp_callbacks import show_mcp_servers_list
-        await show_mcp_servers_list(client, fake_message, 0)
+        await show_mcp_servers_list(client, callback_query.message, 0)
+        await callback_query.answer()
         
     elif action == "models":
-        await callback_query.answer("Opening models menu...")
-        await callback_query.message.delete()
-        # Forward to models handler
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-            text="/models",
-        )
-        await models_handler(client, fake_message, page=0)
+        from app.handlers.models_callbacks import edit_models_list
+        await edit_models_list(client, callback_query.message, 0)
+        await callback_query.answer()
         
     elif action == "tools":
-        await callback_query.answer("Opening system tools menu...")
         from app.handlers.system_tools.system_tools_callback import show_system_tools
         await callback_query.message.edit_text(
-            "**Telegram System Tools**\n\nManage native Telegram capabilities for AI.",
+            "**🛠️ Telegram System Tools**\n\nManage native Telegram capabilities for AI.",
             reply_markup=await show_system_tools(client, callback_query.message),
         )
-        return
+        await callback_query.answer()
+    
+    else:
+        await callback_query.answer("❓ Unknown action", show_alert=True)

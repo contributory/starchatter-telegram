@@ -12,9 +12,17 @@ MODELS_PER_PAGE = ITEMS_PER_PAGE
 
 
 def create_pagination_buttons(
-    page: int, total_pages: int, callback_prefix: str
+    page: int, total_pages: int, callback_prefix: str,
+    back_callback: str | None = None,
 ) -> list:
-    """Create pagination buttons"""
+    """Create pagination buttons with always-present Back button.
+    
+    Args:
+        page: Current page number (0-indexed)
+        total_pages: Total number of pages
+        callback_prefix: Prefix for page callbacks
+        back_callback: Callback data for Back button (default: {prefix}/back)
+    """
     buttons = []
     row = []
 
@@ -28,7 +36,7 @@ def create_pagination_buttons(
     row.append(
         types.InlineKeyboardButton(
             text=f"{page + 1}/{total_pages}",
-            callback_data="noop",  # Current page indicator, not clickable
+            callback_data="noop",
         )
     )
 
@@ -37,23 +45,16 @@ def create_pagination_buttons(
             types.InlineKeyboardButton(
                 text="Next ▶", callback_data=f"{callback_prefix}/page/{page + 1}"
             )
-    )
+        )
 
-    # Add back button at the end of pagination row (or close if single page)
-    if total_pages == 1:
-        row.append(
-            types.InlineKeyboardButton(
-                text="❌ Close",
-                callback_data=f"{callback_prefix}/close",
-            )
+    # Always include Back button
+    back_data = back_callback or f"{callback_prefix}/back"
+    row.append(
+        types.InlineKeyboardButton(
+            text="⬅️ Back",
+            callback_data=back_data,
         )
-    else:
-        row.append(
-            types.InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data=f"{callback_prefix}/back",
-            )
-        )
+    )
 
     if row:
         buttons.append(row)
@@ -67,6 +68,7 @@ def create_numbered_keyboard(
     callback_prefix: str,
     total_pages: int,
     extra_buttons: list[list[types.InlineKeyboardButton]] | None = None,
+    back_callback: str | None = None,
 ) -> types.InlineKeyboardMarkup:
     """Create keyboard displaying list with number buttons and pagination.
 
@@ -106,14 +108,15 @@ def create_numbered_keyboard(
                 )
             )
     
-    # Pagination buttons (last row)
+    # Pagination buttons (last row) - always with Back button
     pagination_buttons = create_pagination_buttons(
-        page, total_pages, callback_prefix
+        page, total_pages, callback_prefix,
+        back_callback=back_callback,
     )
     if pagination_buttons:
         buttons.extend(pagination_buttons)
     
-    # Extra buttons (like Back button for providers list)
+    # Extra buttons
     if extra_buttons:
         buttons.extend(extra_buttons)
     
@@ -127,19 +130,16 @@ def create_models_keyboard(
     total_pages: int,
     selected_model: str | None = None,
     extra_buttons: list[list[types.InlineKeyboardButton]] | None = None,
+    back_callback: str | None = None,
 ) -> types.InlineKeyboardMarkup:
-    """Create keyboard displaying list of models with number buttons and pagination.
-
-    - Each row has 8 number buttons
-    - 10 rows for numbers (80 items)
-    - Last row for pagination
-    """
+    """Create keyboard displaying list of models with number buttons and pagination."""
     return create_numbered_keyboard(
         items=models,
         page=page,
         callback_prefix=callback_prefix,
         total_pages=total_pages,
         extra_buttons=extra_buttons,
+        back_callback=back_callback,
     )
 
 
@@ -149,17 +149,13 @@ def create_providers_keyboard(
     callback_prefix: str,
     total_pages: int,
     extra_buttons: list[list[types.InlineKeyboardButton]] | None = None,
+    back_callback: str | None = None,
 ) -> types.InlineKeyboardMarkup:
     """Create keyboard displaying list of providers with number buttons and pagination.
-
-    - Each row has 8 number buttons
-    - 10 rows for numbers (80 items)
-    - Last row for pagination
 
     Args:
         providers: List of tuples (provider_id, provider_name)
     """
-    # Create items list with provider names for display
     items = [name for _, name in providers]
 
     return create_numbered_keyboard(
@@ -168,65 +164,5 @@ def create_providers_keyboard(
         callback_prefix=callback_prefix,
         total_pages=total_pages,
         extra_buttons=extra_buttons,
+        back_callback=back_callback,
     )
-
-
-def create_provider_actions_keyboard(
-    providers: list[tuple[int, str]],
-    callback_prefix: str = "provider",
-) -> types.InlineKeyboardMarkup:
-    """Create keyboard displaying list of providers with action buttons.
-
-    Each provider has buttons: select, edit, models, delete
-    End of list has back and close buttons.
-
-    Args:
-        providers: List of tuples (provider_id, provider_name)
-        callback_prefix: Prefix for callback data
-    """
-    buttons: list[list[types.InlineKeyboardButton]] = []
-
-    for provider_id, provider_name in providers:
-        # Provider name as header (disabled button)
-        buttons.append([
-            types.InlineKeyboardButton(
-                text=f"🔹 {provider_name}",
-                callback_data="noop",
-            )
-        ])
-
-        # Action buttons for this provider
-        buttons.append([
-            types.InlineKeyboardButton(
-                text="✅ Select",
-                callback_data=f"{callback_prefix}/select/{provider_id}",
-            ),
-            types.InlineKeyboardButton(
-                text="✏️ Edit",
-                callback_data=f"{callback_prefix}/edit/{provider_id}",
-            ),
-        ])
-        buttons.append([
-            types.InlineKeyboardButton(
-                text="🤖 Models",
-                callback_data=f"{callback_prefix}/models/{provider_id}",
-            ),
-            types.InlineKeyboardButton(
-                text="🗑️ Delete",
-                callback_data=f"{callback_prefix}/delete/{provider_id}",
-            ),
-        ])
-
-    # Bottom navigation buttons
-    buttons.append([
-        types.InlineKeyboardButton(
-            text="⬅️ Back",
-            callback_data=f"{callback_prefix}/back",
-        ),
-        types.InlineKeyboardButton(
-            text="❌ Close",
-            callback_data=f"{callback_prefix}/close",
-        ),
-    ])
-
-    return types.InlineKeyboardMarkup(buttons)

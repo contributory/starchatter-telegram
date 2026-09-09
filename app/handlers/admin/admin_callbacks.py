@@ -4,6 +4,60 @@ from pyrogram import Client, enums, filters, types
 from app.handlers.owner import is_user_owner
 
 
+def _build_admin_panel_keyboard() -> types.InlineKeyboardMarkup:
+    """Build the admin panel inline keyboard."""
+    from app.config import WEB_PANEL_URL
+
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="🤖 Providers", callback_data="admin:providers"
+            ),
+            types.InlineKeyboardButton(
+                text="📋 Models", callback_data="admin:models"
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="🔧 MCP Servers", callback_data="admin:mcp_servers"
+            ),
+            types.InlineKeyboardButton(
+                text="🛠️ System Tools", callback_data="admin:system_tools"
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="💬 Chat Settings", callback_data="admin:chat_settings"
+            ),
+            types.InlineKeyboardButton(
+                text="🤖 Bot Settings", callback_data="admin:bot_settings"
+            ),
+        ],
+    ]
+    if WEB_PANEL_URL:
+        keyboard.append([
+            types.InlineKeyboardButton(
+                text="🌐 Web Panel", url=WEB_PANEL_URL
+            ),
+        ])
+    return types.InlineKeyboardMarkup(keyboard)
+
+
+ADMIN_PANEL_TEXT = "**🔧 Starchatter Admin Panel**\n\nSelect a section to manage:"
+
+
+async def _edit_admin_panel(callback_query: types.CallbackQuery):
+    """Edit message to show admin panel."""
+    try:
+        await callback_query.message.edit_text(
+            ADMIN_PANEL_TEXT,
+            reply_markup=_build_admin_panel_keyboard(),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass  # Message may be unchanged
+
+
 @Client.on_callback_query(
     filters.regex(r"^admin:(providers|models|mcp_servers|system_tools|chat_settings|bot_settings|back)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
@@ -17,74 +71,44 @@ async def admin_navigation_handler(client: Client, callback_query: types.Callbac
     
     if action == "back":
         # Return to main admin panel
-        from app.handlers.admin.super_command import super_command
-        # Delete current message and show admin panel again
-        await callback_query.message.delete()
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-            text="/super",
-        )
-        await super_command(client, fake_message)
+        await _edit_admin_panel(callback_query)
         await callback_query.answer()
         return
     
     elif action == "providers":
-        await callback_query.answer("Opening providers menu...")
-        from app.handlers.providers_command import providers_handler
-        await callback_query.message.delete()
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-            text="/providers",
-        )
-        await providers_handler(client, fake_message, page=0)
+        # Edit message to show providers list
+        from app.handlers.provider_callbacks import show_providers_list
+        await show_providers_list(client, callback_query.message, 0, force_cloud=False)
         await callback_query.answer()
         return
     
     elif action == "models":
-        await callback_query.answer("Opening models menu...")
-        from app.handlers.models_command import models_handler
-        await callback_query.message.delete()
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-            text="/models",
-        )
-        await models_handler(client, fake_message, page=0)
+        # Edit message to show models list
+        from app.handlers.models_callbacks import edit_models_list
+        await edit_models_list(client, callback_query.message, 0)
         await callback_query.answer()
         return
     
     elif action == "mcp_servers":
-        await callback_query.answer("Opening MCP servers menu...")
-        await callback_query.message.delete()
+        # Edit message to show MCP servers list
         from app.handlers.mcp_callbacks import show_mcp_servers_list
-        fake_message = types.Message(
-            id=callback_query.message.id,
-            chat=callback_query.message.chat,
-            from_user=callback_query.from_user,
-        )
-        await show_mcp_servers_list(client, fake_message, 0)
+        await show_mcp_servers_list(client, callback_query.message, 0)
         await callback_query.answer()
         return
     
     elif action == "system_tools":
-        await callback_query.answer("Opening system tools menu...")
-        from .system_tools_callback import show_system_tools
+        from app.handlers.system_tools.system_tools_callback import show_system_tools
         await callback_query.message.edit_text(
-            "**Telegram System Tools**\n\nManage native Telegram capabilities for AI.",
+            "**🛠️ Telegram System Tools**\n\nManage native Telegram capabilities for AI.",
             reply_markup=await show_system_tools(client, callback_query.message),
         )
         await callback_query.answer()
         return
     
     elif action == "chat_settings":
-        await callback_query.answer("Chat settings coming soon!")
+        await callback_query.answer("💬 Chat settings coming soon!", show_alert=True)
         return
     
     elif action == "bot_settings":
-        await callback_query.answer("Bot settings coming soon!")
+        await callback_query.answer("🤖 Bot settings coming soon!", show_alert=True)
         return

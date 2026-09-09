@@ -118,6 +118,32 @@ async def group_admin_menu_handler(client: Client, callback_query: types.Callbac
     # Lấy state hiện tại
     state = await _get_group_state(chat_id)
 
+    async def _refresh_menu(state):
+        """Edit message back to group menu with updated state."""
+        new_chatbot_disabled = state["chatbot_disabled"]
+        new_anti_spam_disabled = state["anti_spam_disabled"]
+        keyboard_markup = types.InlineKeyboardMarkup(
+            [
+                [
+                    types.InlineKeyboardButton(
+                        text=("Disable" if not new_chatbot_disabled else "Enable") + " Chatbot",
+                        callback_data="menu/chatbot",
+                    ),
+                    types.InlineKeyboardButton(
+                        text=("Disable" if not new_anti_spam_disabled else "Enable") + " Anti-Spam",
+                        callback_data="menu/anti_spam",
+                    ),
+                ],
+                [types.InlineKeyboardButton(text="Goodbye", callback_data="menu/goodbye")],
+                [button for button in basic_buttons],
+            ]
+        )
+        menu_text = await localize("Group Admin Menu:", user_id=callback_query.from_user.id)
+        try:
+            await callback_query.message.edit_text(menu_text, reply_markup=keyboard_markup)
+        except Exception:
+            pass
+
     if action == "menu/chatbot":
         # Toggle chatbot state
         new_chatbot_disabled = not state["chatbot_disabled"]
@@ -132,7 +158,8 @@ async def group_admin_menu_handler(client: Client, callback_query: types.Callbac
             user_id=callback_query.from_user.id,
         )
         await callback_query.answer(chatbot_status)
-        await callback_query.message.edit_text(chatbot_status)
+        state["chatbot_disabled"] = new_chatbot_disabled
+        await _refresh_menu(state)
 
     elif action == "menu/anti_spam":
         # Toggle anti-spam state
@@ -148,14 +175,18 @@ async def group_admin_menu_handler(client: Client, callback_query: types.Callbac
             user_id=callback_query.from_user.id,
         )
         await callback_query.answer(antispam_status)
-        await callback_query.message.edit_text(antispam_status)
+        state["anti_spam_disabled"] = new_anti_spam_disabled
+        await _refresh_menu(state)
 
     elif action == "menu/goodbye":
         goodbye_text = await localize(
             "Goodbye! 👋", user_id=callback_query.from_user.id
         )
         await callback_query.answer(goodbye_text)
-        await callback_query.message.edit_text(goodbye_text)
+        try:
+            await callback_query.message.edit_text(goodbye_text)
+        except Exception:
+            pass
         await asyncio.sleep(3)
         await client.leave_chat(chat_id)
 
