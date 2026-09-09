@@ -13,7 +13,7 @@ from app.database.local import local_db
 logger = logging.getLogger(__name__)
 
 
-# Chat history management constants
+# Context management constants
 MAX_MESSAGES_PER_CHAT = 50  # Maximum messages to keep in context
 MAX_TOKENS_ESTIMATE = 4000  # Estimated max tokens to avoid context overflow
 MESSAGE_TRUNCATE_LENGTH = 1000  # Truncate long messages
@@ -37,8 +37,15 @@ async def get_default_provider_and_model():
     return provider, model_id
 
 
+def truncate_message(text: str, max_length: int = MESSAGE_TRUNCATE_LENGTH) -> str:
+    """Truncate long messages to fit within context"""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length - 50] + "\n...[message truncated]..."
+
+
 class AIAgent:
-    """Simplified AIAgent without complex instance management"""
+    """Improved AIAgent with better context management and error handling"""
     
     def __init__(self, provider, model_id):
         """Initialize AIAgent with provider and model"""
@@ -97,17 +104,73 @@ class AIAgent:
             mcp_servers=mcp_server,
         )
 
+    async def _run_with_mcp_servers(
+        self,
+        session: SQLiteSession,
+        message: types.Message,
+        text: str,
+        mcp_servers: list,
+        functions: list,
+    ):
+        """Run agent with MCP servers, handling connection lifecycle"""
+        if not mcp_servers:
+            # No MCP servers, run directly
+            res = await Runner.run(
+                self.star_chatter(
+                    mcp_server=[],
+                    message=message,
+                    functions=functions,
+                ),
+                text,
+                session=session,
+            )
+            return res.final_output
+        
+        # With MCP servers - use context managers
+        async with asyncio.timeout(30):
+            # Open all MCP servers
+            for srv in mcp_servers:
+                await srv.__aenter__()
+            
+            try:
+                res = await Runner.run(
+                    self.star_chatter(
+                        mcp_server=mcp_servers,
+                        message=message,
+                        functions=functions,
+                    ),
+                    text,
+                    session=session,
+                )
+                return res.final_output
+            finally:
+                # Close all MCP servers
+                for srv in mcp_servers:
+                    await srv.__aexit__(None, None, None)
+
     async def run_chat(
         self, client: Client, message: types.Message, prompt: str | None = None
     ):
-        """Process chat request directly without queue management"""
+        """
+        Process chat request with improved context management and error recovery.
+        
+        Features:
+        - Automatic message truncation to prevent context overflow
+        - Retry mechanism with session clearing on context errors
+        - Fallback to no-MCP mode on connection failures
+        - Detailed logging for debugging group chat issues
+        """
         chat_id = message.chat.id
+        chat_type = message.chat.type
+        
+        logger.info(f"Processing chat request from {chat_type} {chat_id}")
         
         # Use session with better context management
         session = SQLiteSession(f"chat_{chat_id}", "conversations.sqlite")
 
         @function_tool
         def clear_your_memory():
+            """Clear conversation history"""
             loop = asyncio.get_event_loop()
             asyncio.run_coroutine_threadsafe(session.clear_session(), loop)
             return "History cleared."
@@ -122,7 +185,7 @@ class AIAgent:
             If duration less than 30s, mute permanently.
 
             Args:
-                reason (str): Reason for muting the user.
+                user_id (int): User ID to mute
                 duration_seconds (int): Duration in seconds to mute the user. Default is 0 (permanent mute).
 
             Returns:
@@ -146,6 +209,7 @@ class AIAgent:
             group_id: int,
             user_id: int,
         ):
+            """Unmute a user in the group"""
             loop = asyncio.get_event_loop()
             asyncio.run_coroutine_threadsafe(
                 client.restrict_chat_member(
@@ -153,7 +217,6 @@ class AIAgent:
                 ),
                 loop,
             )
-
             return "Action completed."
 
         @function_tool
@@ -165,7 +228,6 @@ class AIAgent:
 
             Returns:
                 str: Success message
-
             """
             loop = asyncio.get_event_loop()
             if message_ids:
@@ -176,102 +238,117 @@ class AIAgent:
                 asyncio.run_coroutine_threadsafe(message.delete(), loop)
             return "Action completed."
 
-        try:
-            # Get enabled MCP servers from database
-            enabled_servers = await local_db.get_enabled_mcp_servers()
-            mcp_servers = []
-            
-            # Create MCP server connections for each enabled server
-            for server in enabled_servers:
-                try:
-                    mcp_srv = await mcp.MCPServerSse(
-                        name=server.name,
-                        params={"url": server.url},
-                        cache_tools_list=True,
-                    )
-                    mcp_servers.append(mcp_srv)
-                except Exception as e:
-                    logger.warning(f"Failed to connect to MCP server {server.name}: {e}")
-            
-            # If no MCP servers configured, use empty list
-            if not mcp_servers:
-                # Still allow chat without MCP
-                text = (
-                    prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
-                )
-                res = await Runner.run(
-                    self.star_chatter(
-                        mcp_server=[],
-                        message=message,
-                        functions=[
-                            mute_user,
-                            unmute_user,
-                            delete_message,
-                            clear_your_memory,
-                            list_models,
-                            set_model,
-                        ],
-                    ),
-                    text,
-                    session=session,
-                )
-                return res.final_output
-            else:
-                # Use context manager for MCP servers
-                async with asyncio.timeout(30):  # 30 second timeout for MCP connection
-                    # Open all MCP servers
-                    for srv in mcp_servers:
-                        await srv.__aenter__()
-                    
+        # Prepare message text with truncation to prevent context overflow
+        text = (
+            prompt or truncate_message(message.text or message.caption or "") + f"\n[{message.id}]"
+        )
+
+        # Define available functions
+        functions = [
+            mute_user,
+            unmute_user,
+            delete_message,
+            clear_your_memory,
+            list_models,
+            set_model,
+        ]
+
+        # Retry mechanism with exponential backoff
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Get enabled MCP servers from database
+                enabled_servers = await local_db.get_enabled_mcp_servers()
+                mcp_servers = []
+                
+                # Create MCP server connections for each enabled server
+                for server in enabled_servers:
                     try:
-                        text = (
-                            prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
+                        mcp_srv = await mcp.MCPServerSse(
+                            name=server.name,
+                            params={"url": server.url},
+                            cache_tools_list=True,
                         )
-                        res = await Runner.run(
-                            self.star_chatter(
-                                mcp_server=mcp_servers,
-                                message=message,
-                                functions=[
-                                    mute_user,
-                                    unmute_user,
-                                    delete_message,
-                                    clear_your_memory,
-                                    list_models,
-                                    set_model,
-                                ],
-                            ),
-                            text,
-                            session=session,
-                        )
-                        return res.final_output
-                    finally:
-                        # Close all MCP servers
-                        for srv in mcp_servers:
-                            await srv.__aexit__(None, None, None)
-                            
-        except asyncio.TimeoutError:
-            logger.warning("MCP server connection timed out, running without MCP tools")
-            # Fallback: run without MCP
-            text = (
-                prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
-            )
-            res = await Runner.run(
-                self.star_chatter(
-                    mcp_server=[],
+                        mcp_servers.append(mcp_srv)
+                    except Exception as e:
+                        logger.warning(f"Failed to connect to MCP server {server.name}: {e}")
+                
+                # Try to run with MCP servers
+                result = await self._run_with_mcp_servers(
+                    session=session,
                     message=message,
-                    functions=[
-                        mute_user,
-                        unmute_user,
-                        delete_message,
-                        clear_your_memory,
-                        list_models,
-                        set_model,
-                    ],
-                ),
-                text,
-                session=session,
-            )
-            return res.final_output
-        except Exception as e:
-            logger.error(f"Error processing chat request for chat {chat_id}: {e}")
-            raise e
+                    text=text,
+                    mcp_servers=mcp_servers,
+                    functions=functions,
+                )
+                
+                logger.info(f"Successfully processed chat from {chat_type} {chat_id}")
+                return result
+                
+            except asyncio.TimeoutError as e:
+                logger.warning(
+                    f"MCP timeout for chat {chat_id} (attempt {attempt + 1}/{max_retries}), "
+                    f"falling back to no-MCP mode"
+                )
+                last_error = e
+                
+                # Try without MCP servers
+                try:
+                    result = await Runner.run(
+                        self.star_chatter(
+                            mcp_server=[],
+                            message=message,
+                            functions=functions,
+                        ),
+                        text,
+                        session=session,
+                    )
+                    logger.info(f"Successfully processed chat (no-MCP fallback) from {chat_type} {chat_id}")
+                    return result.final_output
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed: {fallback_error}")
+                    last_error = fallback_error
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                last_error = e
+                
+                # Check if it's a context length error
+                is_context_error = any(keyword in error_msg for keyword in [
+                    'context length', 'too many tokens', 'maximum context', 
+                    'max_tokens', 'context_length_exceeded', 'request too large'
+                ])
+                
+                if is_context_error:
+                    logger.warning(
+                        f"Context overflow for chat {chat_id} (attempt {attempt + 1}/{max_retries}), "
+                        f"clearing session and retrying"
+                    )
+                    await session.clear_session()
+                    
+                    # On second retry, also truncate the message more aggressively
+                    if attempt == 1:
+                        text = truncate_message(text, max_length=500)
+                        logger.info(f"Aggressively truncated message for chat {chat_id}")
+                else:
+                    logger.error(
+                        f"Error processing chat from {chat_type} {chat_id} "
+                        f"(attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+            
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                logger.info(f"Waiting {wait_time}s before retry for chat {chat_id}")
+                await asyncio.sleep(wait_time)
+        
+        # All retries failed
+        logger.error(
+            f"All {max_retries} attempts failed for chat {chat_id}. Last error: {last_error}"
+        )
+        return (
+            "⚠️ Xin lỗi, tôi đang gặp vấn đề kỹ thuật. "
+            "Vui lòng thử lại sau hoặc dùng lệnh `/chat` để reset cuộc trò chuyện."
+        )

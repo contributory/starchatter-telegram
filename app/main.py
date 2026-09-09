@@ -1,3 +1,4 @@
+import logging
 from sqlalchemy import select
 from pyrogram import idle
 from app.client import client
@@ -7,6 +8,15 @@ from app.database.models import (
     AIProvider, DefaultModel, TelegramGroup, TelegramUser,
     TelegramChannel, GroupMember, ChannelMember, MCPServer
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+logger = logging.getLogger(__name__)
 
 
 async def sync_cloud_to_local():
@@ -32,9 +42,9 @@ async def sync_cloud_to_local():
                 )
                 await local_db.add(obj_copy)
 
-            print(f"Synced {len(cloud_objects)} {model.__name__} records from cloud to local")
+            logger.info(f"Synced {len(cloud_objects)} {model.__name__} records from cloud to local")
         except Exception as e:
-            print(f"Error syncing {model.__name__}: {e}")
+            logger.error(f"Error syncing {model.__name__}: {e}")
 
 
 async def main():
@@ -43,11 +53,8 @@ async def main():
     local_db.init_db()
 
     # Sync từ cloud về local - gán cloud_db và local_db làm tham số mặc định
-    print("Syncing data from cloud to local...")
-    # try:
+    logger.info("Syncing data from cloud to local...")
     await sync_cloud_to_local()
-    # except Exception as e:
-    #     print(f"Sync error: {e}")
-    print("Sync completed.")
+    logger.info("Sync completed.")
     await idle()
     await client.stop()
