@@ -1,4 +1,4 @@
-"""MCP server callback handlers for managing MCP servers."""
+"""MCP server callback handlers for managing MCP servers with admin: prefix."""
 
 import re
 
@@ -20,20 +20,20 @@ read_db = local_db
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/page/\d+$")
+    filters.regex(r"^admin:mcp/page/\d+$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_page_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle MCP pagination callback"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    page = int(parts[2])
+    page = int(parts[3])
     await show_mcp_servers_list(client, callback_query.message, page)
     await callback_query.answer()
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/back$")
+    filters.regex(r"^admin:mcp/back$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_back_handler(client: Client, callback_query: types.CallbackQuery):
@@ -44,7 +44,7 @@ async def mcp_back_handler(client: Client, callback_query: types.CallbackQuery):
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/close$")
+    filters.regex(r"^admin:mcp/close$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_close_handler(client: Client, callback_query: types.CallbackQuery):
@@ -56,14 +56,14 @@ async def mcp_close_handler(client: Client, callback_query: types.CallbackQuery)
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/\d+$")
+    filters.regex(r"^admin:mcp/(\d+)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_number_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle MCP server number selection callback"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    mcp_num = int(parts[1])
+    mcp_num = int(parts[2])
     
     # Get all MCP servers to calculate which one was selected
     servers = await read_db.get_all_mcp_servers()
@@ -78,14 +78,14 @@ async def mcp_number_handler(client: Client, callback_query: types.CallbackQuery
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/toggle/([^/]+)$")
+    filters.regex(r"^admin:mcp/toggle/([^/]+)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_toggle_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle MCP server toggle callback"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    server_name = parts[2]
+    server_name = parts[3]
 
     result = await write_db.toggle_mcp_server(server_name)
     
@@ -101,14 +101,14 @@ async def mcp_toggle_handler(client: Client, callback_query: types.CallbackQuery
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/delete/([^/]+)$")
+    filters.regex(r"^admin:mcp/delete/([^/]+)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_delete_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle MCP server delete callback"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    server_name = parts[2]
+    server_name = parts[3]
 
     result = await write_db.delete_mcp_server(server_name)
     
@@ -121,14 +121,14 @@ async def mcp_delete_handler(client: Client, callback_query: types.CallbackQuery
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/tools/([^/]+)$")
+    filters.regex(r"^admin:mcp/tools/([^/]+)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_tools_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle MCP server tools view callback"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    server_name = parts[2]
+    server_name = parts[3]
 
     server = await read_db.get_mcp_server_by_name(server_name)
     
@@ -151,7 +151,7 @@ async def mcp_tools_handler(client: Client, callback_query: types.CallbackQuery)
         [
             types.InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data=f"mcp/actions/{server_name}",
+                callback_data=f"admin:mcp/actions/{server_name}",
             ),
         ],
     ]
@@ -167,14 +167,14 @@ async def mcp_tools_handler(client: Client, callback_query: types.CallbackQuery)
 
 
 @Client.on_callback_query(
-    filters.regex(r"^mcp/actions/([^/]+)$")
+    filters.regex(r"^admin:mcp/actions/([^/]+)$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_actions_back_handler(client: Client, callback_query: types.CallbackQuery):
     """Handle back to MCP server actions from tools view"""
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    server_name = parts[2]
+    server_name = parts[3]
 
     server = await read_db.get_mcp_server_by_name(server_name)
     
@@ -218,7 +218,7 @@ async def show_mcp_servers_list(client: Client, message: types.Message, page: in
     markup = create_providers_keyboard(
         providers=page_servers,
         page=page,
-        callback_prefix="mcp",
+        callback_prefix="admin:mcp",
         total_pages=total_pages,
     )
     
@@ -258,23 +258,23 @@ async def show_mcp_actions(
         [
             types.InlineKeyboardButton(
                 text=toggle_text,
-                callback_data=f"mcp/toggle/{server.name}",
+                callback_data=f"admin:mcp/toggle/{server.name}",
             ),
             types.InlineKeyboardButton(
                 text="🗑️ Delete",
-                callback_data=f"mcp/delete/{server.name}",
+                callback_data=f"admin:mcp/delete/{server.name}",
             ),
         ],
         [
             types.InlineKeyboardButton(
                 text="🛠️ Tools",
-                callback_data=f"mcp/tools/{server.name}",
+                callback_data=f"admin:mcp/tools/{server.name}",
             ),
         ],
         [
             types.InlineKeyboardButton(
                 text="⬅️ Back",
-                callback_data="mcp/back",
+                callback_data="admin:mcp/back",
             ),
         ],
     ]
