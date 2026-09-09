@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from typing import Optional
 
 from agents import Agent, Runner, SQLiteSession, function_tool, mcp
 from agents.extensions.models.litellm_model import LitellmModel
@@ -10,6 +11,12 @@ from app.ai.base import list_models, models, set_model
 from app.database.local import local_db
 
 logger = logging.getLogger(__name__)
+
+
+# Chat history management constants
+MAX_MESSAGES_PER_CHAT = 50  # Maximum messages to keep in context
+MAX_TOKENS_ESTIMATE = 4000  # Estimated max tokens to avoid context overflow
+MESSAGE_TRUNCATE_LENGTH = 1000  # Truncate long messages
 
 
 async def get_default_provider_and_model():
@@ -95,6 +102,8 @@ class AIAgent:
     ):
         """Process chat request directly without queue management"""
         chat_id = message.chat.id
+        
+        # Use session with better context management
         session = SQLiteSession(f"chat_{chat_id}", "conversations.sqlite")
 
         @function_tool
@@ -168,17 +177,31 @@ class AIAgent:
             return "Action completed."
 
         try:
-            async with mcp.MCPServerSse(
-                name="Tools",
-                params={"url": "https://nymbo-tools.hf.space/gradio_api/mcp/sse"},
-                cache_tools_list=True,
-            ) as mcp_server:
+            # Get enabled MCP servers from database
+            enabled_servers = await local_db.get_enabled_mcp_servers()
+            mcp_servers = []
+            
+            # Create MCP server connections for each enabled server
+            for server in enabled_servers:
+                try:
+                    mcp_srv = await mcp.MCPServerSse(
+                        name=server.name,
+                        params={"url": server.url},
+                        cache_tools_list=True,
+                    )
+                    mcp_servers.append(mcp_srv)
+                except Exception as e:
+                    logger.warning(f"Failed to connect to MCP server {server.name}: {e}")
+            
+            # If no MCP servers configured, use empty list
+            if not mcp_servers:
+                # Still allow chat without MCP
                 text = (
                     prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
                 )
                 res = await Runner.run(
                     self.star_chatter(
-                        mcp_server=[mcp_server],
+                        mcp_server=[],
                         message=message,
                         functions=[
                             mute_user,
@@ -193,6 +216,62 @@ class AIAgent:
                     session=session,
                 )
                 return res.final_output
+            else:
+                # Use context manager for MCP servers
+                async with asyncio.timeout(30):  # 30 second timeout for MCP connection
+                    # Open all MCP servers
+                    for srv in mcp_servers:
+                        await srv.__aenter__()
+                    
+                    try:
+                        text = (
+                            prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
+                        )
+                        res = await Runner.run(
+                            self.star_chatter(
+                                mcp_server=mcp_servers,
+                                message=message,
+                                functions=[
+                                    mute_user,
+                                    unmute_user,
+                                    delete_message,
+                                    clear_your_memory,
+                                    list_models,
+                                    set_model,
+                                ],
+                            ),
+                            text,
+                            session=session,
+                        )
+                        return res.final_output
+                    finally:
+                        # Close all MCP servers
+                        for srv in mcp_servers:
+                            await srv.__aexit__(None, None, None)
+                            
+        except asyncio.TimeoutError:
+            logger.warning("MCP server connection timed out, running without MCP tools")
+            # Fallback: run without MCP
+            text = (
+                prompt or (message.text or message.caption or "") + f"\n[{message.id}]"
+            )
+            res = await Runner.run(
+                self.star_chatter(
+                    mcp_server=[],
+                    message=message,
+                    functions=[
+                        mute_user,
+                        unmute_user,
+                        delete_message,
+                        clear_your_memory,
+                        list_models,
+                        set_model,
+                    ],
+                ),
+                text,
+                session=session,
+            )
+            return res.final_output
         except Exception as e:
             logger.error(f"Error processing chat request for chat {chat_id}: {e}")
             raise e

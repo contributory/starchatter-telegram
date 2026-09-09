@@ -1,9 +1,27 @@
-**/__pycache__
-.venv
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
 .env
-.mypy_cache
-.codesandbox
-**/*.db
-**/*.sqlite*
-app/starchatter.session
-repro_db.py
+.env.local
+*.env.*
+
+# Logs
+*.log
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Dependencies
+venv/
+.venv/
+node_modules/
+.mypy_cache/
+.pytest_cache/
+```

@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 
-from app.database.models import AIProvider, DefaultModel, TelegramUser, TelegramGroup, TelegramChannel, GroupMember, ChannelMember, Base
+from app.database.models import AIProvider, DefaultModel, TelegramUser, TelegramGroup, TelegramChannel, GroupMember, ChannelMember, Base, MCPServer
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -294,6 +294,69 @@ class LocalDatabase:
                 is_owner=is_owner,
             )
             await self.add(member)
+
+    # MCPServer methods
+    async def get_mcp_server_by_name(self, name: str):
+        """Get MCP server by name"""
+        return await self.get(MCPServer, name=name)
+
+    async def get_all_mcp_servers(self):
+        """Get all MCP servers"""
+        result = await self.execute(select(MCPServer))
+        return result.scalars().all()
+
+    async def get_enabled_mcp_servers(self):
+        """Get all enabled MCP servers"""
+        result = await self.execute(select(MCPServer).filter_by(enabled=True))
+        return result.scalars().all()
+
+    async def add_mcp_server(self, name: str, url: str, description: str = None, enabled: bool = True):
+        """Add or update MCP server"""
+        server = await self.get_mcp_server_by_name(name)
+        if server:
+            server.url = url
+            if description:
+                server.description = description
+            server.enabled = enabled
+            await self.commit()
+        else:
+            server = MCPServer(
+                name=name,
+                url=url,
+                description=description,
+                enabled=enabled,
+            )
+            await self.add(server)
+        return server
+
+    async def toggle_mcp_server(self, name: str, enabled: bool = None):
+        """Toggle MCP server enabled state"""
+        server = await self.get_mcp_server_by_name(name)
+        if server:
+            if enabled is None:
+                server.enabled = not server.enabled
+            else:
+                server.enabled = enabled
+            await self.commit()
+            return server.enabled
+        return None
+
+    async def delete_mcp_server(self, name: str):
+        """Delete MCP server"""
+        server = await self.get_mcp_server_by_name(name)
+        if server:
+            await self.delete(server)
+            return True
+        return False
+
+    async def update_mcp_server_tools(self, name: str, tools_config: dict):
+        """Update tools configuration for MCP server"""
+        server = await self.get_mcp_server_by_name(name)
+        if server:
+            server.tools_config = tools_config
+            await self.commit()
+            return True
+        return False
 
 
 # Global instance

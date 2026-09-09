@@ -16,7 +16,10 @@ async def start(client: Client, message: types.Message):
     """Handle start/help command"""
     markup = types.InlineKeyboardMarkup([[button for button in basic_buttons]])
     welcome_text = await localize(
-        "Welcome to StarChatter.\n\nAvailable commands:\n\n/image [prompt] - Generate an image (NSFW non-blocked).\n/poem [prompt] - Generate a poem.",
+        "Welcome to StarChatter.\n\nAvailable commands:\n\n"
+        "/menu - Open main menu with buttons\n"
+        "/image [prompt] - Generate an image (NSFW non-blocked).\n"
+        "/poem [prompt] - Generate a poem.",
         user_id=message.from_user.id,
     )
     await message.reply(welcome_text, reply_markup=markup)

@@ -6,6 +6,7 @@ from app.database.models.telegram_group import TelegramGroup
 from app.database.models.telegram_channel import TelegramChannel
 from app.database.models.ai_provider import AIProvider
 from app.database.models.default_model import DefaultModel
+from app.database.models.mcp_server import MCPServer
 
 __all__ = [
     "Base",
@@ -16,4 +17,5 @@ __all__ = [
     "TelegramChannel",
     "AIProvider",
     "DefaultModel",
+    "MCPServer",
 ]
