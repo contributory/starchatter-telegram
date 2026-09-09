@@ -67,3 +67,6 @@ API_HASH = get_env_or_prompt("API_HASH", is_secret=True)
 TURSO_DB_URL = get_env_or_prompt("TURSO_DB_URL")
 TURSO_AUTH_TOKEN = get_env_or_prompt("TURSO_AUTH_TOKEN", is_secret=True)
 OWNER_PASSWORD = get_env_or_prompt("OWNER_PASSWORD", is_secret=True)
+
+# Optional: Web panel URL for admin interface (can be empty)
+WEB_PANEL_URL = environ.get("WEB_PANEL_URL", "")
