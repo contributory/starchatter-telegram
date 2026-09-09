@@ -5,14 +5,14 @@ from app.database.cloud import cloud_db
 from app.database.local import local_db
 from app.database.models import (
     AIProvider, DefaultModel, TelegramGroup, TelegramUser,
-    TelegramChannel, GroupMember, ChannelMember
+    TelegramChannel, GroupMember, ChannelMember, MCPServer
 )
 
 
 async def sync_cloud_to_local():
     """Sync all data from cloud to local database - cloud data always overwrites local data"""
 
-    models = [AIProvider, TelegramUser, TelegramGroup, TelegramChannel, GroupMember, ChannelMember, DefaultModel]
+    models = [AIProvider, TelegramUser, TelegramGroup, TelegramChannel, GroupMember, ChannelMember, DefaultModel, MCPServer]
 
     for model in models:
         try:
