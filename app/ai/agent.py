@@ -225,12 +225,7 @@ class AIAgent:
             return cls(provider, model_id)
         raise ValueError("No AI provider configured. Use /add_provider to add one.")
 
-    def star_chatter(
-        self,
-        mcp_server: list,
-        message: types.Message,
-        functions: list | None = None,
-    ):
+    def star_chatter(self, mcp_server: list, message: types.Message, functions: list | None = None):
         if functions is None:
             functions = []
         full_name = (
@@ -242,9 +237,7 @@ class AIAgent:
             if message.sender_chat
             else message.from_user.full_name
         )
-        user_id = (
-            message.sender_chat.id if message.sender_chat else message.from_user.id
-        )
+        user_id = message.sender_chat.id if message.sender_chat else message.from_user.id
         return Agent(
             "StarChatter",
             instructions=(
@@ -282,9 +275,7 @@ class AIAgent:
                 await srv.__aenter__()
             try:
                 res = await Runner.run(
-                    self.star_chatter(
-                        mcp_server=mcp_servers, message=message, functions=functions
-                    ),
+                    self.star_chatter(mcp_server=mcp_servers, message=message, functions=functions),
                     text,
                     session=session,
                 )
@@ -293,26 +284,19 @@ class AIAgent:
                 for srv in mcp_servers:
                     await srv.__aexit__(None, None, None)
 
-    async def run_chat(
-        self, client: Client, message: types.Message, prompt: str | None = None
-    ):
+    async def run_chat(self, client: Client, message: types.Message, prompt: str | None = None):
         """
         Process chat request with System Tools integration.
-        - Tools are built dynamically from SYSTEM_TOOLS_REGISTRY (only enabled ones)
-        - Retry with context clear on overflow
-        - MCP timeout fallback
+        Returns None on failure so chatbot_listener can show error with buttons.
         """
         chat_id = message.chat.id
         chat_type = message.chat.type
         logger.info(f"Processing chat from {chat_type} {chat_id}")
 
         session = SQLiteSession(f"chat_{chat_id}", "conversations.sqlite")
-
-        # Build tools from System Tools registry (only enabled)
         functions = build_system_tools(client, message)
         logger.info(f"Loaded {len(functions)} system tools for chat {chat_id}")
 
-        # Prepare message text
         text = (
             prompt
             or truncate_message(message.text or message.caption or "")
@@ -324,7 +308,6 @@ class AIAgent:
 
         for attempt in range(max_retries):
             try:
-                # Get enabled MCP servers
                 enabled_servers = await local_db.get_enabled_mcp_servers()
                 mcp_servers = []
                 for server in enabled_servers:
@@ -381,7 +364,4 @@ class AIAgent:
                 await asyncio.sleep(2 ** attempt)
 
         logger.error(f"All {max_retries} attempts failed chat {chat_id}: {last_error}")
-        return (
-            "⚠️ Xin lỗi, tôi đang gặp vấn đề kỹ thuật. "
-            "Vui lòng thử lại sau hoặc dùng lệnh `/chat` để reset cuộc trò chuyện."
-        )
+        return None  # chatbot_listener will show error with action buttons
