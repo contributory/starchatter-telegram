@@ -2,7 +2,11 @@ import asyncio
 from datetime import datetime, timedelta
 
 
-from app.database.models import AIProvider, DefaultModel, TelegramUser, TelegramGroup, TelegramChannel, GroupMember, ChannelMember, Base, MCPServer, ensure_mcp_server_auth_columns
+from app.database.models import (
+    AIProvider, Base, ChannelMember, DefaultModel, GroupMember, MCPServer,
+    TelegramChannel, TelegramGroup, TelegramUser, ensure_ai_provider_columns,
+    ensure_mcp_server_auth_columns,
+)
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -44,6 +48,7 @@ class LocalDatabase:
             if self._engine:
                 Base.metadata.create_all(self._engine)
                 ensure_mcp_server_auth_columns(self._engine)
+                ensure_ai_provider_columns(self._engine)
                 self._initialized_db = True
 
     def _get_session(self) -> Session | None:

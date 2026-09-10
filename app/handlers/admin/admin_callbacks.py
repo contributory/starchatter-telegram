@@ -78,7 +78,10 @@ async def admin_navigation_handler(client: Client, callback_query: types.Callbac
     elif action == "providers":
         # Edit message to show providers list
         from app.handlers.provider_callbacks import show_providers_list
-        await show_providers_list(client, callback_query.message, 0, force_cloud=False)
+        await show_providers_list(
+            client, callback_query.message, 0, force_cloud=False,
+            viewer_user_id=callback_query.from_user.id, back_callback="admin:back",
+        )
         await callback_query.answer()
         return
     

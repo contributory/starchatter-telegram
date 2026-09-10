@@ -72,19 +72,24 @@ async def menu_callback_handler(client: Client, callback_query: types.CallbackQu
         await callback_query.answer()
         return
     
-    # Check if user is owner for all other actions
+    # Providers are public. Other configuration areas remain admin-only.
+    if action == "providers":
+        from app.handlers.provider_callbacks import show_providers_list
+        await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
+        await show_providers_list(
+            client, callback_query.message, 0,
+            force_cloud=False, viewer_user_id=callback_query.from_user.id,
+        )
+        await callback_query.answer()
+        return
+
     if not is_user_owner(callback_query.from_user.id):
         await callback_query.answer("❌ Only owners can use this menu.", show_alert=True)
         return
-    
+
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
-    
-    if action == "providers":
-        from app.handlers.provider_callbacks import show_providers_list
-        await show_providers_list(client, callback_query.message, 0, force_cloud=False)
-        await callback_query.answer()
-        
-    elif action == "mcp_servers":
+
+    if action == "mcp_servers":
         from app.handlers.mcp_callbacks import show_mcp_servers_list
         await show_mcp_servers_list(client, callback_query.message, 0)
         await callback_query.answer()

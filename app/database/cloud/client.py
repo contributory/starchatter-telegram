@@ -2,7 +2,10 @@ import asyncio
 from datetime import datetime, timedelta
 from app.config import TURSO_AUTH_TOKEN, TURSO_DB_URL
 from app.database.local import local_db
-from app.database.models import AIProvider, DefaultModel, TelegramUser, Base, MCPServer, ensure_mcp_server_auth_columns
+from app.database.models import (
+    AIProvider, Base, DefaultModel, MCPServer, TelegramUser,
+    ensure_ai_provider_columns, ensure_mcp_server_auth_columns,
+)
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -53,6 +56,7 @@ class CloudDatabase:
             if self._engine:
                 Base.metadata.create_all(self._engine)
                 ensure_mcp_server_auth_columns(self._engine)
+                ensure_ai_provider_columns(self._engine)
                 self._initialized_db = True
 
     def _get_session(self) -> Session | None:

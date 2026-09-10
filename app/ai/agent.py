@@ -5,10 +5,13 @@ import traceback
 import time
 from datetime import datetime, timedelta
 from agents import Agent, Runner, SQLiteSession, function_tool, mcp
-from agents.extensions.models.litellm_model import LitellmModel
 from pyrogram import Client, types
+from openai import AsyncOpenAI
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.models.openai_responses import OpenAIResponsesModel
 
 from app.ai.mcp_oauth import refresh_access_token
+from app.ai.provider_types import PROVIDER_OPENAI_RESPONSES
 from app.database.cloud import cloud_db
 from app.database.local import local_db
 
@@ -244,26 +247,36 @@ class AIAgent:
 
     def __init__(self, provider, model_id):
         self.model_id = model_id
-        self.litellm_model = LitellmModel(
-            model="openai/" + model_id,
+        openai_client = AsyncOpenAI(
             base_url=provider.base_url,
             api_key=provider.api_key,
         )
+        provider_type = getattr(provider, "provider_type", None) or "chat_completions"
+        if provider_type == PROVIDER_OPENAI_RESPONSES:
+            self.provider_model = OpenAIResponsesModel(
+                model=model_id,
+                openai_client=openai_client,
+            )
+        else:
+            self.provider_model = OpenAIChatCompletionsModel(
+                model=model_id,
+                openai_client=openai_client,
+            )
         # Holds the last failure detail (exception text/traceback) when run_chat
         # gives up and returns None, so callers can capture the full error.
         self.last_error_text: str = ""
 
     @classmethod
     async def create(cls):
-        from app.ai.base import models
+        from app.ai.base import get_provider_models
         provider, model_id = await get_default_provider_and_model()
         if not model_id and provider:
-            models_list = await models()
+            models_list = await get_provider_models(provider=provider)
             if models_list:
                 model_id = models_list[0]
         if provider and model_id:
             return cls(provider, model_id)
-        raise ValueError("No AI provider configured. Use /add_provider to add one.")
+        raise ValueError("No AI provider configured. Use /providers to add one.")
 
     def star_chatter(self, mcp_server: list, message: types.Message, functions: list | None = None):
         if functions is None:
@@ -290,7 +303,7 @@ class AIAgent:
                 f"Only use destructive tools (delete, kick, restrict) when clearly requested."
             ),
             tools=functions,
-            model=self.litellm_model,
+            model=self.provider_model,
             mcp_servers=mcp_server,
         )
 

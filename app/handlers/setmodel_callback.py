@@ -158,7 +158,7 @@ async def show_providers_for_feature(
             await message.edit_text(
                 "**⚠️ No Providers**\n\n"
                 "Add a provider first:\n"
-                "`/add_provider <name> <base_url> <api_key>`",
+                "`/providers`",
             )
         except Exception:
             pass
@@ -209,7 +209,7 @@ async def show_models_for_provider(
     client: Client, message: types.Message, feature: str, provider_id: int, page: int
 ):
     """Display models list of a provider with numbered pagination"""
-    from app.ai.base import models as get_models
+    from app.ai.base import get_provider_models
 
     provider = await read_db.get(AIProvider, id=provider_id)
 
@@ -220,7 +220,7 @@ async def show_models_for_provider(
             pass
         return
 
-    all_models = await get_models()
+    all_models = await get_provider_models(provider=provider)
 
     if not all_models:
         try:

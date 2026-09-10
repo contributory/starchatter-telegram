@@ -4,7 +4,7 @@ from app.database.models.channel_member import ChannelMember
 from app.database.models.telegram_user import TelegramUser
 from app.database.models.telegram_group import TelegramGroup
 from app.database.models.telegram_channel import TelegramChannel
-from app.database.models.ai_provider import AIProvider
+from app.database.models.ai_provider import AIProvider, ensure_ai_provider_columns
 from app.database.models.default_model import DefaultModel
 from app.database.models.mcp_server import MCPServer, ensure_mcp_server_auth_columns
 
@@ -16,6 +16,7 @@ __all__ = [
     "TelegramGroup",
     "TelegramChannel",
     "AIProvider",
+    "ensure_ai_provider_columns",
     "DefaultModel",
     "MCPServer",
     "ensure_mcp_server_auth_columns",

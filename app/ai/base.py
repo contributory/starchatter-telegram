@@ -14,7 +14,7 @@ async def get_client() -> AsyncClient:
             base_url=provider.base_url,
             api_key=provider.api_key,
         )
-    raise ValueError("No AI provider configured. Use /add_provider to add one.")
+    raise ValueError("No AI provider configured. Use /providers to add one.")
 
 
 async def models():
