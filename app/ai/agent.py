@@ -1,7 +1,7 @@
 import asyncio
 import logging
+import traceback
 from datetime import datetime, timedelta
-
 from agents import Agent, Runner, SQLiteSession, function_tool, mcp
 from agents.extensions.models.litellm_model import LitellmModel
 from pyrogram import Client, types
@@ -212,6 +212,9 @@ class AIAgent:
             base_url=provider.base_url,
             api_key=provider.api_key,
         )
+        # Holds the last failure detail (exception text/traceback) when run_chat
+        # gives up and returns None, so callers can capture the full error.
+        self.last_error_text: str = ""
 
     @classmethod
     async def create(cls):
@@ -363,5 +366,11 @@ class AIAgent:
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
 
+        # Capture the full error (including any API body) for reporting.
+        self.last_error_text = (
+            f"Last error (attempt {max_retries}):\n"
+            f"{last_error}\n"
+            f"{traceback.format_exc()}"
+        )
         logger.error(f"All {max_retries} attempts failed chat {chat_id}: {last_error}")
         return None  # chatbot_listener will show error with action buttons
