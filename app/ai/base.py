@@ -109,4 +109,4 @@ def set_model(model_id: str):
         # Save model to DefaultModel (write via cloud, will mirror to local)
         loop.run_until_complete(cloud_db.set_default_model("chat", provider.name, model_id))
         return f"Model `{model_id}` has been set as default for chat!"
-    return "No provider is configured. Use /add_provider to add provider."
+    return "No provider is configured. Use /providers to add a provider."
