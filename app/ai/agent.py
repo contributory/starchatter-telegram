@@ -52,6 +52,8 @@ async def _get_mcp_auth_headers(server) -> dict[str, str]:
         raise RuntimeError(f"OAuth authorization is required for MCP server {server.name}")
 
     token_type = str(config.get("token_type") or "Bearer").strip()
+    if token_type.lower() == "bearer":
+        token_type = "Bearer"
     return {"Authorization": f"{token_type} {token}"}
 
 

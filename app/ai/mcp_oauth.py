@@ -115,7 +115,8 @@ def _apply_token_payload(config: dict, payload: dict) -> dict:
 
     updated = dict(config)
     updated["access_token"] = str(token)
-    updated["token_type"] = str(payload.get("token_type") or "Bearer")
+    token_type = str(payload.get("token_type") or "Bearer").strip()
+    updated["token_type"] = "Bearer" if token_type.lower() == "bearer" else token_type
     if payload.get("refresh_token"):
         updated["refresh_token"] = str(payload["refresh_token"])
     if payload.get("scope"):
