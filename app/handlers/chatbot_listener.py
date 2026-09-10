@@ -5,6 +5,7 @@ from typing import Dict, Set
 from app.ai.agent import AIAgent
 from app.database.cloud import cloud_db
 from app.database.local import local_db
+from app.handlers.owner import is_user_owner
 from pyrogram import Client, enums, filters, types
 from pyrogram.errors import MessageNotModified, BadRequest
 
@@ -26,13 +27,22 @@ _last_errors: Dict[int, str] = {}
 # Track error messages whose report has already been sent (button disabled).
 _reported_messages: Set[int] = set()
 
+# Map a report message id (sent to admin) -> original chat where the error occurred.
+_report_map: Dict[int, int] = {}
+
 
 def _record_error(chat_id: int, error_text: str) -> None:
-    """Remember the latest error detail for a chat (for the Send Error button)."""
+    """Remember the latest error detail for a chat (for the Report Error button)."""
     detail = (error_text or "").strip()
     if len(detail) > 3500:
         detail = detail[-3500:]
     _last_errors[chat_id] = detail
+
+
+def _is_error_report_reply(_, __, message) -> bool:
+    """True when a private message replies to one of our sent error reports."""
+    reply = getattr(message, "reply_to_message", None)
+    return bool(reply and reply.id in _report_map)
 
 
 ERROR_MARKUP = types.InlineKeyboardMarkup([
@@ -41,7 +51,7 @@ ERROR_MARKUP = types.InlineKeyboardMarkup([
         types.InlineKeyboardButton(text="🤖 Models", callback_data="admin:models"),
     ],
     [
-        types.InlineKeyboardButton(text="📤 Send Error", callback_data="error:send"),
+        types.InlineKeyboardButton(text="📤 Report Error", callback_data="error:send"),
     ],
 ])
 
@@ -55,7 +65,7 @@ def _sent_error_markup() -> types.InlineKeyboardMarkup:
         ],
         [
             # Routed to the noop handler so it can't trigger a re-send.
-            types.InlineKeyboardButton(text="✅ Sent Error", callback_data="noop:error_sent"),
+            types.InlineKeyboardButton(text="✅ Reported", callback_data="noop:error_sent"),
         ],
     ])
 
@@ -114,6 +124,7 @@ async def safe_reply(message: types.Message, text: str, reply_markup=None):
     (filters.mentioned & ~filters.new_chat_members | filters.private)
     & filters.incoming
     & ~filters.create(lambda _, __, m: m.text and m.text.startswith("/"))  # type: ignore
+    & ~filters.create(_is_error_report_reply)  # type: ignore
 )
 async def chatbot_handler(client: Client, message: types.Message):
     """Process chatbot message with improved error handling."""
@@ -208,7 +219,12 @@ async def chatbot_handler(client: Client, message: types.Message):
 
 
 async def _send_error_report(client: Client, chat_id: int) -> bool:
-    """Send the stored error detail to the bot admins' private chats."""
+    """Send the stored error detail to the bot admins' private chats.
+
+    Returns True if at least one admin received the report.
+    Also records a mapping so that an admin replying to the report message
+    routes that reply back to the chat where the error occurred.
+    """
     error_text = _last_errors.get(chat_id)
     if not error_text:
         error_text = "No detailed error message was recorded for this chat."
@@ -217,7 +233,8 @@ async def _send_error_report(client: Client, chat_id: int) -> bool:
     report = (
         "⚠️ **Bot Error Report**\n\n"
         f"**Chat:** `{chat_id}`\n\n"
-        f"```text\n{error_text}\n```"
+        f"```text\n{error_text}\n```\n\n"
+        "💬 _Reply to this message to send a response to that chat._"
     )
 
     sent = False
@@ -229,11 +246,13 @@ async def _send_error_report(client: Client, chat_id: int) -> bool:
 
     for owner in owners or []:
         try:
-            await client.send_message(
+            sent_msg = await client.send_message(
                 owner.id,
                 report,
                 parse_mode=enums.ParseMode.MARKDOWN,
             )
+            # Remember the source chat so an admin reply can be routed back.
+            _report_map[sent_msg.id] = chat_id
             sent = True
         except Exception as e:
             logger.error(f"Failed to send error report to owner {owner.id}: {e}")
@@ -259,7 +278,7 @@ async def send_error_callback(client: Client, callback_query: types.CallbackQuer
 
     sent = await _send_error_report(client, chat_id)
     if sent:
-        await callback_query.answer("✅ Error report sent.")
+        await callback_query.answer("✅ Error reported.")
         # Disable the button so it can't be pressed / re-sent again.
         try:
             await message.edit_reply_markup(_sent_error_markup())
@@ -269,3 +288,53 @@ async def send_error_callback(client: Client, callback_query: types.CallbackQuer
         # Sending failed - keep the button active so the user can retry.
         _reported_messages.discard(message.id)
         await callback_query.answer("❌ Could not send the error report.", show_alert=True)
+
+
+@Client.on_message(
+    filters.private
+    & filters.incoming
+    & ~filters.me  # type: ignore
+    & filters.create(_is_error_report_reply)  # type: ignore
+    & filters.create(lambda _, __, msg: is_user_owner(msg.from_user.id) if msg.from_user else False)  # type: ignore
+)
+async def admin_error_reply_handler(client: Client, message: types.Message):
+    """Route an admin's reply to the error report back to the affected chat."""
+    reply = message.reply_to_message
+    if not reply:
+        return
+
+    target_chat_id = _report_map.get(reply.id)
+    if target_chat_id is None:
+        return
+
+    admin_note = "👮‍♂️ **Admin response:**"
+
+    try:
+        text = message.text or message.caption or ""
+        if text:
+            body = f"{admin_note}\n\n{text}"
+            await client.send_message(
+                target_chat_id,
+                body,
+                parse_mode=enums.ParseMode.MARKDOWN,
+            )
+        else:
+            # Non-text reply (media, sticker, ...) - copy it with the admin note as caption.
+            caption = message.caption or ""
+            new_caption = f"{admin_note}\n\n{caption}" if caption else admin_note
+            await client.copy_message(
+                target_chat_id,
+                from_chat_id=message.chat.id,
+                message_id=message.id,
+                caption=new_caption,
+            )
+        await message.reply("✅ Your response was sent to the chat.", quote=True)
+    except Exception as e:
+        logger.error(f"Failed to forward admin reply to chat {target_chat_id}: {e}")
+        try:
+            await message.reply(
+                "❌ Could not send the response to the chat.",
+                quote=True,
+            )
+        except Exception:
+            pass
