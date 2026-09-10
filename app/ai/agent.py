@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import traceback
+
+import aiohttp
 from datetime import datetime, timedelta
 from agents import Agent, Runner, SQLiteSession, function_tool, mcp
 from agents.extensions.models.litellm_model import LitellmModel
@@ -11,6 +13,50 @@ from app.database.local import local_db
 logger = logging.getLogger(__name__)
 
 MESSAGE_TRUNCATE_LENGTH = 1000
+
+
+async def _get_mcp_auth_headers(server) -> dict[str, str]:
+    """Build Authorization headers for an MCP server.
+
+    OAuth currently uses the server-to-server OAuth 2.0 client_credentials grant.
+    """
+    auth_type = (getattr(server, "auth_type", None) or "none").lower()
+    config = getattr(server, "auth_config", None) or {}
+
+    if auth_type == "bearer":
+        token = (config.get("token") or "").strip()
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    if auth_type != "oauth":
+        return {}
+
+    token_url = (config.get("token_url") or "").strip()
+    client_id = (config.get("client_id") or "").strip()
+    client_secret = (config.get("client_secret") or "").strip()
+    scope = (config.get("scope") or "").strip()
+    if not token_url or not client_id or not client_secret:
+        raise ValueError(f"OAuth configuration is incomplete for MCP server {server.name}")
+
+    data = {"grant_type": "client_credentials"}
+    if scope:
+        data["scope"] = scope
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            token_url,
+            data=data,
+            auth=aiohttp.BasicAuth(client_id, client_secret),
+        ) as response:
+            payload = await response.json(content_type=None)
+            if response.status >= 400:
+                detail = payload.get("error_description") or payload.get("error") or response.reason
+                raise RuntimeError(f"OAuth token request failed ({response.status}): {detail}")
+            token = payload.get("access_token")
+            token_type = payload.get("token_type", "Bearer")
+            if not token:
+                raise RuntimeError("OAuth token response did not contain access_token")
+            return {"Authorization": f"{token_type} {token}"}
 
 
 async def get_default_provider_and_model():
@@ -315,9 +361,13 @@ class AIAgent:
                 mcp_servers = []
                 for server in enabled_servers:
                     try:
+                        headers = await _get_mcp_auth_headers(server)
+                        params = {"url": server.url}
+                        if headers:
+                            params["headers"] = headers
                         mcp_srv = await mcp.MCPServerSse(
                             name=server.name,
-                            params={"url": server.url},
+                            params=params,
                             cache_tools_list=True,
                         )
                         mcp_servers.append(mcp_srv)

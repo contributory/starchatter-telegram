@@ -204,40 +204,93 @@ async def mcp_actions_back_handler(client: Client, callback_query: types.Callbac
 
 # ==================== Add MCP - Button Flow ====================
 
+
+def _cancel_markup(back_callback: str | None = None) -> types.InlineKeyboardMarkup:
+    rows = []
+    if back_callback:
+        rows.append([types.InlineKeyboardButton(text="⬅️ Back", callback_data=back_callback)])
+    rows.append([types.InlineKeyboardButton(text="❌ Cancel", callback_data="admin:mcp/add_cancel")])
+    return types.InlineKeyboardMarkup(rows)
+
+
+def _auth_markup() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup([
+        [types.InlineKeyboardButton(text="🌐 No Auth", callback_data="admin:mcp/add_auth/none")],
+        [types.InlineKeyboardButton(text="🔑 Bearer Token", callback_data="admin:mcp/add_auth/bearer")],
+        [types.InlineKeyboardButton(text="🔐 OAuth 2.0", callback_data="admin:mcp/add_auth/oauth")],
+        [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/url")],
+        [types.InlineKeyboardButton(text="❌ Cancel", callback_data="admin:mcp/add_cancel")],
+    ])
+
+
+def _description_markup() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup([
+        [types.InlineKeyboardButton(text="⏭️ Skip Description", callback_data="admin:mcp/add_skip_desc")],
+        [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+        [types.InlineKeyboardButton(text="❌ Cancel", callback_data="admin:mcp/add_cancel")],
+    ])
+
+
+async def _show_auth_choice(client: Client, state: dict):
+    state["step"] = "auth_select"
+    await client.edit_message_text(
+        chat_id=state["chat_id"],
+        message_id=state["menu_msg_id"],
+        text=(
+            "**➕ Add MCP Server — Authentication**\n\n"
+            f"**Name:** `{state['name']}`\n"
+            f"**URL:** `{state['url']}`\n\n"
+            "Choose the authentication required by this MCP server:"
+        ),
+        reply_markup=_auth_markup(),
+        parse_mode=enums.ParseMode.MARKDOWN,
+    )
+
+
+async def _show_description_step(client: Client, state: dict):
+    state["step"] = "desc"
+    auth_label = {
+        "none": "No Auth",
+        "bearer": "Bearer Token",
+        "oauth": "OAuth 2.0 (client_credentials)",
+    }.get(state.get("auth_type", "none"), "No Auth")
+    await client.edit_message_text(
+        chat_id=state["chat_id"],
+        message_id=state["menu_msg_id"],
+        text=(
+            "**➕ Add MCP Server — Description**\n\n"
+            f"**Name:** `{state['name']}`\n"
+            f"**URL:** `{state['url']}`\n"
+            f"**Auth:** `{auth_label}`\n\n"
+            "Send a **description** (optional) or press Skip:"
+        ),
+        reply_markup=_description_markup(),
+        parse_mode=enums.ParseMode.MARKDOWN,
+    )
+
+
 @Client.on_callback_query(
     filters.regex(r"^admin:mcp/add$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_add_handler(client: Client, callback_query: types.CallbackQuery):
-    """Start add MCP server flow - ask for server name"""
+    """Start add MCP server flow."""
     user_id = callback_query.from_user.id
-    chat_id = callback_query.message.chat.id
-    # Save state
     _add_mcp_state[user_id] = {
         "step": "name",
-        "chat_id": chat_id,
+        "chat_id": callback_query.message.chat.id,
         "menu_msg_id": callback_query.message.id,
+        "auth_type": "none",
+        "auth_config": {},
     }
-    # Mark the user as being inside the add-MCP input flow so the chatbot
-    # listener ignores their next text messages.
     flow_state.start_flow(user_id, "mcp_add")
-
-    cancel_markup = types.InlineKeyboardMarkup([[
-        types.InlineKeyboardButton(
-            text="❌ Cancel", callback_data="admin:mcp/add_cancel"
-        )
-    ]])
-
-    try:
-        await callback_query.message.edit_text(
-            "**➕ Add MCP Server — Step 1/3**\n\n"
-            "Please send the **server name** (e.g. `MyTools`):\n\n"
-            "_Reply to this message or just type in chat._",
-            reply_markup=cancel_markup,
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-    except Exception:
-        pass
+    await callback_query.message.edit_text(
+        "**➕ Add MCP Server — Name**\n\n"
+        "Please send the **server name** (e.g. `MyTools`):\n\n"
+        "_Reply to this message or just type in chat._",
+        reply_markup=_cancel_markup(),
+        parse_mode=enums.ParseMode.MARKDOWN,
+    )
     await callback_query.answer()
 
 
@@ -246,12 +299,76 @@ async def mcp_add_handler(client: Client, callback_query: types.CallbackQuery):
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_add_cancel_handler(client: Client, callback_query: types.CallbackQuery):
-    """Cancel add MCP flow"""
     user_id = callback_query.from_user.id
     _add_mcp_state.pop(user_id, None)
     flow_state.end_flow(user_id)
     await show_mcp_servers_list(client, callback_query.message, 0)
     await callback_query.answer("Cancelled.")
+
+
+@Client.on_callback_query(
+    filters.regex(r"^admin:mcp/add_back/(url|auth)$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def mcp_add_back_handler(client: Client, callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = _add_mcp_state.get(user_id)
+    if not state:
+        await callback_query.answer("Session expired.", show_alert=True)
+        return
+    target = str(callback_query.data).rsplit("/", 1)[-1]
+    if target == "url":
+        state["step"] = "url"
+        await callback_query.message.edit_text(
+            "**➕ Add MCP Server — URL**\n\n"
+            f"**Name:** `{state['name']}`\n\n"
+            "Send the **server URL** (e.g. `https://example.com/mcp/sse`):",
+            reply_markup=_cancel_markup(),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    else:
+        state["auth_type"] = "none"
+        state["auth_config"] = {}
+        await _show_auth_choice(client, state)
+    await callback_query.answer()
+
+
+@Client.on_callback_query(
+    filters.regex(r"^admin:mcp/add_auth/(none|bearer|oauth)$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def mcp_add_auth_handler(client: Client, callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = _add_mcp_state.get(user_id)
+    if not state or state.get("step") != "auth_select":
+        await callback_query.answer("Session expired.", show_alert=True)
+        return
+
+    auth_type = str(callback_query.data).rsplit("/", 1)[-1]
+    state["auth_type"] = auth_type
+    state["auth_config"] = {}
+
+    if auth_type == "none":
+        await _show_description_step(client, state)
+    elif auth_type == "bearer":
+        state["step"] = "bearer_token"
+        await callback_query.message.edit_text(
+            "**➕ MCP Authentication — Bearer Token**\n\n"
+            "Send the **Bearer token**. Your message will be deleted immediately after reading.",
+            reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    else:
+        state["step"] = "oauth_token_url"
+        await callback_query.message.edit_text(
+            "**➕ MCP Authentication — OAuth 2.0**\n\n"
+            "OAuth mode uses the `client_credentials` grant.\n\n"
+            "Send the **OAuth token endpoint URL**:",
+            reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    await callback_query.answer()
+
 
 @Client.on_message(
     filters.create(lambda _, __, m: (
@@ -262,7 +379,7 @@ async def mcp_add_cancel_handler(client: Client, callback_query: types.CallbackQ
     ))  # type: ignore
 )
 async def mcp_add_conversation_handler(client: Client, message: types.Message):
-    """Handle step-by-step add MCP server via text replies"""
+    """Handle step-by-step add MCP server via text replies."""
     user_id = message.from_user.id
     state = _add_mcp_state.get(user_id)
     if not state:
@@ -273,90 +390,122 @@ async def mcp_add_conversation_handler(client: Client, message: types.Message):
         return True
 
     step = state["step"]
-    chat_id = state["chat_id"]
 
-    # Delete user's reply to keep chat clean
+    # Secret-bearing replies are deleted immediately; keeping all wizard replies
+    # deleted also keeps the admin chat clean.
     try:
         await message.delete()
     except Exception:
         pass
 
-    cancel_markup = types.InlineKeyboardMarkup([[
-        types.InlineKeyboardButton(
-            text="❌ Cancel", callback_data="admin:mcp/add_cancel"
-        )
-    ]])
-
     if step == "name":
         state["name"] = text
         state["step"] = "url"
-        try:
-            await client.edit_message_text(
-                chat_id=chat_id,
-                message_id=state["menu_msg_id"],
-                text=(
-                    f"**➕ Add MCP Server — Step 2/3**\n\n"
-                    f"**Name:** `{text}`\n\n"
-                    f"Now send the **server URL** "
-                    f"(e.g. `https://example.com/mcp/sse`):"
-                ),
-                reply_markup=cancel_markup,
-                parse_mode=enums.ParseMode.MARKDOWN,
-            )
-        except Exception:
-            pass
+        await client.edit_message_text(
+            chat_id=state["chat_id"],
+            message_id=state["menu_msg_id"],
+            text=(
+                "**➕ Add MCP Server — URL**\n\n"
+                f"**Name:** `{text}`\n\n"
+                "Send the **server URL** (e.g. `https://example.com/mcp/sse`):"
+            ),
+            reply_markup=_cancel_markup(),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
 
     elif step == "url":
-        if not text.startswith("http://") and not text.startswith("https://"):
-            try:
-                await client.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=state["menu_msg_id"],
-                    text=(
-                        f"**➕ Add MCP Server — Step 2/3**\n\n"
-                        f"**Name:** `{state['name']}`\n\n"
-                        f"❌ Invalid URL. Must start with `http://` or `https://`\n\n"
-                        f"Please send a valid URL:"
-                    ),
-                    reply_markup=cancel_markup,
-                    parse_mode=enums.ParseMode.MARKDOWN,
-                )
-            except Exception:
-                pass
-            return True
-
-        state["url"] = text
-        state["step"] = "desc"
-
-        skip_markup = types.InlineKeyboardMarkup([
-            [types.InlineKeyboardButton(
-                text="⏭️ Skip Description", callback_data="admin:mcp/add_skip_desc"
-            )],
-            [types.InlineKeyboardButton(
-                text="❌ Cancel", callback_data="admin:mcp/add_cancel"
-            )],
-        ])
-        try:
+        if not text.startswith(("http://", "https://")):
             await client.edit_message_text(
-                chat_id=chat_id,
+                chat_id=state["chat_id"],
                 message_id=state["menu_msg_id"],
                 text=(
-                    f"**➕ Add MCP Server — Step 3/3**\n\n"
-                    f"**Name:** `{state['name']}`\n"
-                    f"**URL:** `{text}`\n\n"
-                    f"Send a **description** (optional) or press Skip:"
+                    "**➕ Add MCP Server — URL**\n\n"
+                    f"**Name:** `{state['name']}`\n\n"
+                    "❌ Invalid URL. It must start with `http://` or `https://`.\n\n"
+                    "Please send a valid URL:"
                 ),
-                reply_markup=skip_markup,
+                reply_markup=_cancel_markup(),
                 parse_mode=enums.ParseMode.MARKDOWN,
             )
-        except Exception:
-            pass
+            return True
+        state["url"] = text
+        await _show_auth_choice(client, state)
+
+    elif step == "bearer_token":
+        state["auth_config"] = {"token": text}
+        await _show_description_step(client, state)
+
+    elif step == "oauth_token_url":
+        if not text.startswith(("http://", "https://")):
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text="❌ Invalid token endpoint URL. Please send an `http://` or `https://` URL:",
+                reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+                parse_mode=enums.ParseMode.MARKDOWN,
+            )
+            return True
+        state["auth_config"]["token_url"] = text
+        state["step"] = "oauth_client_id"
+        await client.edit_message_text(
+            chat_id=state["chat_id"], message_id=state["menu_msg_id"],
+            text="**➕ MCP OAuth — Client ID**\n\nSend the OAuth **client_id**:",
+            reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+
+    elif step == "oauth_client_id":
+        state["auth_config"]["client_id"] = text
+        state["step"] = "oauth_client_secret"
+        await client.edit_message_text(
+            chat_id=state["chat_id"], message_id=state["menu_msg_id"],
+            text=(
+                "**➕ MCP OAuth — Client Secret**\n\n"
+                "Send the OAuth **client_secret**. Your message will be deleted immediately after reading."
+            ),
+            reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+
+    elif step == "oauth_client_secret":
+        state["auth_config"]["client_secret"] = text
+        state["step"] = "oauth_scope"
+        scope_markup = types.InlineKeyboardMarkup([
+            [types.InlineKeyboardButton(text="⏭️ No Scope", callback_data="admin:mcp/add_skip_scope")],
+            [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+            [types.InlineKeyboardButton(text="❌ Cancel", callback_data="admin:mcp/add_cancel")],
+        ])
+        await client.edit_message_text(
+            chat_id=state["chat_id"], message_id=state["menu_msg_id"],
+            text="**➕ MCP OAuth — Scope**\n\nSend OAuth **scope** (space-separated), or press No Scope:",
+            reply_markup=scope_markup,
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+
+    elif step == "oauth_scope":
+        state["auth_config"]["scope"] = text
+        await _show_description_step(client, state)
 
     elif step == "desc":
         state["desc"] = text
-        await _finalize_add_mcp(client, user_id, state, chat_id)
+        await _finalize_add_mcp(client, user_id, state, state["chat_id"])
 
     return True
+
+
+@Client.on_callback_query(
+    filters.regex(r"^admin:mcp/add_skip_scope$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def mcp_add_skip_scope_handler(client: Client, callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    state = _add_mcp_state.get(user_id)
+    if not state or state.get("step") != "oauth_scope":
+        await callback_query.answer("Session expired.", show_alert=True)
+        return
+    state["auth_config"]["scope"] = ""
+    await _show_description_step(client, state)
+    await callback_query.answer()
 
 
 @Client.on_callback_query(
@@ -364,17 +513,14 @@ async def mcp_add_conversation_handler(client: Client, message: types.Message):
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_add_skip_desc_handler(client: Client, callback_query: types.CallbackQuery):
-    """Skip description step and finalize add"""
     user_id = callback_query.from_user.id
     state = _add_mcp_state.get(user_id)
-    if not state:
+    if not state or state.get("step") != "desc":
         await callback_query.answer("Session expired.", show_alert=True)
         return
     state["desc"] = None
     await _finalize_add_mcp(
-        client, user_id, state,
-        state["chat_id"],
-        message=callback_query.message
+        client, user_id, state, state["chat_id"], message=callback_query.message
     )
     await callback_query.answer()
 
@@ -386,27 +532,38 @@ async def _finalize_add_mcp(
     chat_id: int,
     message: types.Message | None = None,
 ):
-    """Save MCP server to DB and show result"""
+    """Save MCP server to DB and show result without exposing credentials."""
     name = state["name"]
     url = state["url"]
     desc = state.get("desc")
+    auth_type = state.get("auth_type", "none")
+    auth_config = state.get("auth_config") or {}
     menu_msg_id = state["menu_msg_id"]
     _add_mcp_state.pop(user_id, None)
     flow_state.end_flow(user_id)
 
+    auth_label = {
+        "none": "No Auth",
+        "bearer": "Bearer Token",
+        "oauth": "OAuth 2.0 (client_credentials)",
+    }.get(auth_type, auth_type)
+
     try:
-        await write_db.add_mcp_server(name, url, desc, enabled=True)
+        await write_db.add_mcp_server(
+            name, url, desc, enabled=True,
+            auth_type=auth_type, auth_config=auth_config,
+        )
         result_text = (
-            f"**✅ MCP Server Added!**\n\n"
+            "**✅ MCP Server Added!**\n\n"
             f"**Name:** `{name}`\n"
             f"**URL:** `{url}`\n"
+            f"**Auth:** `{auth_label}`\n"
             f"**Description:** {desc or 'None'}\n"
-            f"**Status:** ✅ Enabled"
+            "**Status:** ✅ Enabled"
         )
     except Exception as e:
         result_text = f"**❌ Failed to add MCP server**\n\n`{e}`"
 
-    # Reload MCP list
     servers = await read_db.get_all_mcp_servers()
     servers_list = [(s.id, s.name) for s in servers]
     total_pages = max(1, (len(servers_list) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
@@ -417,28 +574,21 @@ async def _finalize_add_mcp(
         total_pages=total_pages,
         back_callback="admin:mcp/back",
     )
-    # Add row with "➕ Add Server" button
     markup.inline_keyboard.insert(0, [
-        types.InlineKeyboardButton(
-            text="➕ Add Server", callback_data="admin:mcp/add"
-        )
+        types.InlineKeyboardButton(text="➕ Add Server", callback_data="admin:mcp/add")
     ])
 
-    start_num = 1
     server_names_list = []
     for i, (sid, sname) in enumerate(servers_list[:ITEMS_PER_PAGE]):
-        num = start_num + i
         server_obj = next((s for s in servers if s.id == sid), None)
         status_icon = "✅" if server_obj and server_obj.enabled else "❌"
-        server_names_list.append(f"`{num}`. {status_icon} `{sname}`")
+        server_names_list.append(f"`{i + 1}`. {status_icon} `{sname}`")
 
-    servers_text = "\n".join(server_names_list)
     list_text = (
-        f"{result_text}\n\n"
-        f"---\n"
+        f"{result_text}\n\n---\n"
         f"**🔧 MCP Servers** (Page 1/{total_pages})\n\n"
-        f"{servers_text}\n\n"
-        f"Tap a number to manage server."
+        f"{'\n'.join(server_names_list)}\n\n"
+        "Tap a number to manage server."
     )
 
     try:
@@ -548,9 +698,16 @@ async def show_mcp_actions(client: Client, message: types.Message, server: MCPSe
     ]
     markup = types.InlineKeyboardMarkup(buttons)
 
+    auth_label = {
+        "none": "No Auth",
+        "bearer": "Bearer Token",
+        "oauth": "OAuth 2.0 (client_credentials)",
+    }.get(getattr(server, "auth_type", None) or "none", "Unknown")
+
     new_text = (
         f"**🔧 MCP Server: {server.name}**\n\n"
         f"**URL:** `{server.url}`\n"
+        f"**Auth:** `{auth_label}`\n"
         f"**Description:** {server.description or 'None'}\n"
         f"**Status:** {status}\n\n"
         f"Use buttons below to manage this server."

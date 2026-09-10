@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from app.config import TURSO_AUTH_TOKEN, TURSO_DB_URL
 from app.database.local import local_db
-from app.database.models import AIProvider, DefaultModel, TelegramUser, Base, MCPServer
+from app.database.models import AIProvider, DefaultModel, TelegramUser, Base, MCPServer, ensure_mcp_server_auth_columns
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -52,6 +52,7 @@ class CloudDatabase:
                 self._create_engine()
             if self._engine:
                 Base.metadata.create_all(self._engine)
+                ensure_mcp_server_auth_columns(self._engine)
                 self._initialized_db = True
 
     def _get_session(self) -> Session | None:
@@ -396,15 +397,17 @@ class CloudDatabase:
         return result.scalars().all()
 
     async def add_mcp_server(
-        self, name: str, url: str, description: str = None, enabled: bool = True
+        self, name: str, url: str, description: str = None, enabled: bool = True,
+        auth_type: str = "none", auth_config: dict | None = None,
     ):
-        """Add or update MCP server - mirrors to local"""
+        """Add or update MCP server - mirrors to local."""
         server = await self.get_mcp_server_by_name(name)
         if server:
             server.url = url
-            if description:
-                server.description = description
+            server.description = description
             server.enabled = enabled
+            server.auth_type = auth_type
+            server.auth_config = auth_config or {}
             await self.merge(server)
         else:
             server = MCPServer(
@@ -412,6 +415,8 @@ class CloudDatabase:
                 url=url,
                 description=description,
                 enabled=enabled,
+                auth_type=auth_type,
+                auth_config=auth_config or {},
             )
             await self.add(server)
         return server
