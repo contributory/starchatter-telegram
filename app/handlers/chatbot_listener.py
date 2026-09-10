@@ -256,22 +256,45 @@ async def chatbot_handler(client: Client, message: types.Message):
                 ))
     except Exception as e:
         logger.warning(f"Failed to update DB for {chat_type} {chat_id}: {e}")
+# Keep text error reports safely under Telegram's ~4096 char message limit.
+MAX_TEXT_REPORT_LEN = 3500
 
 
 async def _send_error_report(client: Client, chat_id: int) -> bool:
-    """Send the full error file to the bot admins' private chats.
+    """Send the full error report to the bot admins' private chats.
 
-    Sends the whole temporary error file as a document. If no file is
-    available, falls back to an inline message with the short error detail.
+    The report is sent as a text message when it is short enough; if the
+    error message is too large to fit comfortably in a Telegram message it is
+    saved to a temporary file and sent as a document instead.
 
     Returns True if at least one admin received the report.
     Also records a mapping so that an admin replying to the report message
     routes that reply back to the chat where the error occurred.
     """
-    error_text = _last_errors.get(chat_id)
+    error_text = _last_errors.get(chat_id) or "No detailed error message was recorded."
     file_path = _last_error_files.get(chat_id)
     if file_path and not os.path.isfile(file_path):
         file_path = None
+
+    # Build the report body (the part that holds the error content).
+    body = (
+        "⚠️ **Bot Error Report**\n\n"
+        f"**Chat:** `{chat_id}`\n\n"
+        f"```text\n{error_text}\n```\n\n"
+        "__Reply to this message to send a response to that chat.__"
+    )
+
+    # If the error message is too large for a text message, ensure we have a
+    # temp file to send instead of falling back to a (truncated) text message.
+    if file_path is None and len(body) > MAX_TEXT_REPORT_LEN:
+        file_path = _save_error_file(chat_id, error_text)
+
+    caption = (
+        "⚠️ **Bot Error Report**\n\n"
+        f"**Chat:** `{chat_id}`\n\n"
+        "The full error is attached below.\n\n"
+        "__Reply to this message to send a response to that chat.__"
+    )
 
     sent = False
     try:
@@ -290,26 +313,14 @@ async def _send_error_report(client: Client, chat_id: int) -> bool:
                     owner.id,
                     file_path,
                     file_name=file_name,
-                    caption=(
-                        "⚠️ **Bot Error Report**\n\n"
-                        f"**Chat:** `{chat_id}`\n\n"
-                        "The full error is attached below.\n\n"
-                        "__Reply to this message to send a response to that chat.__"
-                    ),
+                    caption=caption,
                     parse_mode=enums.ParseMode.MARKDOWN,
                 )
             else:
-                # Fallback: no file available - send short detail as text.
-                content = error_text or "No detailed error message was recorded."
-                report = (
-                    "⚠️ **Bot Error Report**\n\n"
-                    f"**Chat:** `{chat_id}`\n\n"
-                    f"```text\n{content}\n```\n\n"
-                    "__Reply to this message to send a response to that chat.__"
-                )
+                # Error is small enough - send it as a text message.
                 sent_msg = await client.send_message(
                     owner.id,
-                    report,
+                    body,
                     parse_mode=enums.ParseMode.MARKDOWN,
                 )
             # Remember the source chat so an admin reply can be routed back.
@@ -327,7 +338,6 @@ async def _send_error_report(client: Client, chat_id: int) -> bool:
             pass
 
     return sent
-
 
 @Client.on_callback_query(filters.regex(r"^error:send$"))
 async def send_error_callback(client: Client, callback_query: types.CallbackQuery):
