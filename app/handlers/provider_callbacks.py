@@ -80,6 +80,17 @@ async def provider_close_handler(client: Client, callback_query: types.CallbackQ
     await callback_query.answer()
 
 
+@Client.on_callback_query(
+    filters.regex(r"^provider/list$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_list_handler(client: Client, callback_query: types.CallbackQuery):
+    """Return from a provider's actions to the providers list."""
+    await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
+    await show_providers_list(client, callback_query.message, 0, force_cloud=False)
+    await callback_query.answer()
+
+
 # ==================== Add Provider Flow ====================
 
 @Client.on_callback_query(
@@ -723,7 +734,7 @@ async def show_provider_actions(
         ],
         [
             types.InlineKeyboardButton(
-                text="⬅️ Back to Providers", callback_data="provider/back"
+                text="⬅️ Back to Providers", callback_data="provider/list"
             ),
         ],
     ]

@@ -17,6 +17,13 @@ write_db = cloud_db
 read_db = local_db
 
 
+def _add_provider_button() -> types.InlineKeyboardButton:
+    """The '➕ Add Provider' button shown at the top of the providers list."""
+    return types.InlineKeyboardButton(
+        text="➕ Add Provider", callback_data="provider/add"
+    )
+
+
 @Client.on_message(
     filters.command("providers")
     & filters.create(lambda _, __, m: is_user_owner(m.from_user.id))  # type: ignore
@@ -30,9 +37,15 @@ async def providers_handler(client: Client, message: types.Message, page: int = 
     default_provider = await read_db.get_default_provider()
 
     if not providers:
+        markup = types.InlineKeyboardMarkup([
+            [_add_provider_button()],
+        ])
         await message.reply(
-            "No providers yet. Add a provider using:\n"
+            "**🤖 AI Providers**\n\n"
+            "No providers yet.\n\n"
+            "Tap **➕ Add Provider** to add one, or use\n"
             "`/add_provider <name> <base_url> <api_key>`",
+            reply_markup=markup,
             quote=True,
         )
         return
@@ -53,6 +66,8 @@ async def providers_handler(client: Client, message: types.Message, page: int = 
         callback_prefix="provider",
         total_pages=total_pages,
     )
+    # Insert "➕ Add Provider" button at the top
+    markup.inline_keyboard.insert(0, [_add_provider_button()])
 
     # Build message with provider names and numbers
     start_num = page * ITEMS_PER_PAGE + 1
@@ -68,7 +83,7 @@ async def providers_handler(client: Client, message: types.Message, page: int = 
     await message.reply(
         f"**AI Providers** (Page {page + 1}/{total_pages})\n\n"
         f"{providers_text}\n\n"
-        f"Tap a number to select provider.",
+        f"Tap a number to select, or ➕ to add new provider.",
         reply_markup=markup,
         quote=True,
     )
