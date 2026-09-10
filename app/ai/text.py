@@ -19,6 +19,10 @@ async def generate_localized_text(original_text: str, user_language: str = "en")
     Returns:
         AI-generated text in the user's language, or original English text on failure
     """
+    # English is the built-in source language, so no provider call is needed.
+    if (user_language or "en").lower().startswith("en"):
+        return original_text
+
     # Check if provider is configured (đọc từ local)
     provider = await local_db.get_default_provider()
     if not provider:
@@ -36,6 +40,10 @@ async def generate_localized_text(original_text: str, user_language: str = "en")
         selected_provider = await local_db.get_provider_by_name(default_model.provider_name)
         if selected_provider:
             provider = selected_provider
+
+    if not model_id:
+        logger.debug("No translate model configured; using original text")
+        return original_text
 
     try:
         client = AsyncOpenAI(

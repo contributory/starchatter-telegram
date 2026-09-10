@@ -1,6 +1,10 @@
 """Owner authentication handler"""
 from app.config import OWNER_PASSWORD
 from app.database.cloud import cloud_db
+from app.database.local import local_db
+from app.database.models import TelegramUser
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from pyrogram import Client, enums, filters, types
 
 db = cloud_db
@@ -14,14 +18,27 @@ def verify_password(password: str) -> bool:
 
 
 def is_user_owner(user_id: int) -> bool:
-    """Check if user is owner (sync wrapper)"""
-    import asyncio
+    """Check owner status synchronously for Pyrogram filter predicates.
+
+    Filters run on the dispatcher's active event-loop thread, so this helper
+    must never call ``run_until_complete``. Owner data is mirrored to the
+    local SQLite database at startup; use a short independent SQLAlchemy
+    session for the tiny lookup instead.
+    """
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(db.is_owner(user_id))
+        local_db.init_db()
+        with Session(local_db.engine) as session:
+            value = session.execute(
+                select(TelegramUser.is_owner).where(TelegramUser.id == user_id)
+            ).scalar_one_or_none()
+            return bool(value)
+    except Exception:
+        return False
+
+
+async def is_user_owner_async(user_id: int) -> bool:
+    """Check owner status from async handlers without nesting event loops."""
+    return await local_db.is_owner(user_id)
 
 
 @Client.on_message(filters.command("owner") & filters.private)  # type: ignore

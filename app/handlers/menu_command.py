@@ -1,6 +1,6 @@
 """Menu command handler with inline keyboard buttons."""
 
-from app.handlers.owner import is_user_owner
+from app.handlers.owner import is_user_owner_async
 from pyrogram import Client, enums, filters, types
 
 
@@ -83,7 +83,7 @@ async def menu_callback_handler(client: Client, callback_query: types.CallbackQu
         await callback_query.answer()
         return
 
-    if not is_user_owner(callback_query.from_user.id):
+    if not await is_user_owner_async(callback_query.from_user.id):
         await callback_query.answer("❌ Only owners can use this menu.", show_alert=True)
         return
 

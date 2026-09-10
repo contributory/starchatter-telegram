@@ -4,13 +4,13 @@ import sys
 import os
 
 from pyrogram import Client, filters, types
-from app.handlers.owner import is_user_owner
+from app.handlers.owner import is_user_owner_async
 
 @Client.on_message(filters.command("update") & filters.private)  # type: ignore
 async def update_handler(client: Client, message: types.Message):
     """Handle update command - performs git pull and restarts the application"""
     # Check if user is owner
-    if not is_user_owner(message.from_user.id):
+    if not await is_user_owner_async(message.from_user.id):
         await message.reply("❌ You don't have permission to use this command.", quote=True)
         return
 
