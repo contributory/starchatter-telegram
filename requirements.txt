@@ -5,6 +5,7 @@ langdetect==1.0.9
 litellm==1.80.5
 openai==2.8.1
 openai-agents==0.6.1
+mcp>=1.11.0,<2
 pillow==12.0.0
 pyrofork==2.3.68
 python-dotenv==1.2.1

@@ -199,7 +199,7 @@ def _start_oauth_poll(client: Client, user_id: int, oauth_state: str) -> None:
 async def mcp_page_handler(client: Client, callback_query: types.CallbackQuery):
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    page = int(parts[3])
+    page = int(parts[2])
     await show_mcp_servers_list(client, callback_query.message, page)
     await callback_query.answer()
 
@@ -246,7 +246,7 @@ async def mcp_close_handler(client: Client, callback_query: types.CallbackQuery)
 async def mcp_number_handler(client: Client, callback_query: types.CallbackQuery):
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
     parts = str(callback_query.data).split("/")
-    mcp_num = int(parts[2])
+    mcp_num = int(parts[1])
     servers = await read_db.get_all_mcp_servers()
     if 1 <= mcp_num <= len(servers):
         await show_mcp_actions(client, callback_query.message, servers[mcp_num - 1])
@@ -263,7 +263,7 @@ async def mcp_number_handler(client: Client, callback_query: types.CallbackQuery
 )
 async def mcp_toggle_handler(client: Client, callback_query: types.CallbackQuery):
     await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
-    server_name = callback_query.data.split("/", 3)[3]
+    server_name = str(callback_query.data).split("/", 2)[2]
     result = await write_db.toggle_mcp_server(server_name)
     if result is None:
         await callback_query.answer("MCP server not found!", show_alert=True)
@@ -283,7 +283,7 @@ async def mcp_toggle_handler(client: Client, callback_query: types.CallbackQuery
 )
 async def mcp_delete_handler(client: Client, callback_query: types.CallbackQuery):
     """Show delete confirmation dialog"""
-    server_name = callback_query.data.split("/", 3)[3]
+    server_name = str(callback_query.data).split("/", 2)[2]
     markup = types.InlineKeyboardMarkup([
         [
             types.InlineKeyboardButton(
@@ -314,7 +314,7 @@ async def mcp_delete_handler(client: Client, callback_query: types.CallbackQuery
 )
 async def mcp_delete_confirm_handler(client: Client, callback_query: types.CallbackQuery):
     """Execute deletion after confirmation"""
-    server_name = callback_query.data.split("/", 3)[3]
+    server_name = str(callback_query.data).split("/", 2)[2]
     result = await write_db.delete_mcp_server(server_name)
     if result:
         await callback_query.answer(f"🗑️ {server_name} deleted!")
@@ -330,7 +330,7 @@ async def mcp_delete_confirm_handler(client: Client, callback_query: types.Callb
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_tools_handler(client: Client, callback_query: types.CallbackQuery):
-    server_name = callback_query.data.split("/", 3)[3]
+    server_name = str(callback_query.data).split("/", 2)[2]
     server = await read_db.get_mcp_server_by_name(server_name)
     if not server:
         await callback_query.answer("MCP server not found!", show_alert=True)
@@ -365,7 +365,7 @@ async def mcp_tools_handler(client: Client, callback_query: types.CallbackQuery)
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
 async def mcp_actions_back_handler(client: Client, callback_query: types.CallbackQuery):
-    server_name = callback_query.data.split("/", 3)[3]
+    server_name = str(callback_query.data).split("/", 2)[2]
     server = await read_db.get_mcp_server_by_name(server_name)
     if not server:
         await callback_query.answer("MCP server not found!", show_alert=True)

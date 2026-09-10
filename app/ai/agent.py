@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import traceback
+from contextlib import AsyncExitStack
 
 import time
 from datetime import datetime, timedelta
-from agents import Agent, Runner, SQLiteSession, function_tool, mcp
+from agents import Agent, Runner, SQLiteSession, function_tool
+from agents.mcp.server import MCPServerSse, MCPServerStreamableHttp
 from pyrogram import Client, types
 from openai import AsyncOpenAI
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
@@ -324,18 +326,37 @@ class AIAgent:
             return res.final_output
 
         async with asyncio.timeout(30):
-            for srv in mcp_servers:
-                await srv.__aenter__()
-            try:
+            async with AsyncExitStack() as stack:
+                connected_servers = []
+                for srv in mcp_servers:
+                    try:
+                        await stack.enter_async_context(srv)
+                        tools = await srv.list_tools()
+                        logger.info(
+                            "MCP server %s connected with %d tools",
+                            srv.name,
+                            len(tools),
+                        )
+                        connected_servers.append(srv)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "MCP server %s unavailable: %s",
+                            getattr(srv, "name", "unknown"),
+                            exc,
+                        )
+
                 res = await Runner.run(
-                    self.star_chatter(mcp_server=mcp_servers, message=message, functions=functions),
+                    self.star_chatter(
+                        mcp_server=connected_servers,
+                        message=message,
+                        functions=functions,
+                    ),
                     text,
                     session=session,
                 )
                 return res.final_output
-            finally:
-                for srv in mcp_servers:
-                    await srv.__aexit__(None, None, None)
 
     async def run_chat(self, client: Client, message: types.Message, prompt: str | None = None):
         """
@@ -366,17 +387,30 @@ class AIAgent:
                 for server in enabled_servers:
                     try:
                         headers = await _get_mcp_auth_headers(server)
-                        params = {"url": server.url}
+                        params = {"url": server.url, "timeout": 15}
                         if headers:
                             params["headers"] = headers
-                        mcp_srv = await mcp.MCPServerSse(
-                            name=server.name,
-                            params=params,
-                            cache_tools_list=True,
+
+                        # Streamable HTTP is the current MCP transport. Keep
+                        # legacy SSE support for endpoints explicitly ending in /sse.
+                        server_class = (
+                            MCPServerSse
+                            if server.url.rstrip("/").lower().endswith("/sse")
+                            else MCPServerStreamableHttp
                         )
-                        mcp_servers.append(mcp_srv)
-                    except Exception as e:
-                        logger.warning(f"Failed to connect MCP server {server.name}: {e}")
+                        mcp_servers.append(
+                            server_class(
+                                name=server.name,
+                                params=params,
+                                cache_tools_list=True,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to configure MCP server %s: %s",
+                            server.name,
+                            exc,
+                        )
 
                 result = await self._run_with_mcp_servers(
                     session=session,
