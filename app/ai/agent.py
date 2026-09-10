@@ -2,12 +2,14 @@ import asyncio
 import logging
 import traceback
 
-import aiohttp
+import time
 from datetime import datetime, timedelta
 from agents import Agent, Runner, SQLiteSession, function_tool, mcp
 from agents.extensions.models.litellm_model import LitellmModel
 from pyrogram import Client, types
 
+from app.ai.mcp_oauth import refresh_access_token
+from app.database.cloud import cloud_db
 from app.database.local import local_db
 
 logger = logging.getLogger(__name__)
@@ -16,12 +18,9 @@ MESSAGE_TRUNCATE_LENGTH = 1000
 
 
 async def _get_mcp_auth_headers(server) -> dict[str, str]:
-    """Build Authorization headers for an MCP server.
-
-    OAuth currently uses the server-to-server OAuth 2.0 client_credentials grant.
-    """
+    """Build Authorization headers for an MCP server and refresh OAuth when needed."""
     auth_type = (getattr(server, "auth_type", None) or "none").lower()
-    config = getattr(server, "auth_config", None) or {}
+    config = dict(getattr(server, "auth_config", None) or {})
 
     if auth_type == "bearer":
         token = (config.get("token") or "").strip()
@@ -30,33 +29,25 @@ async def _get_mcp_auth_headers(server) -> dict[str, str]:
     if auth_type != "oauth":
         return {}
 
-    token_url = (config.get("token_url") or "").strip()
-    client_id = (config.get("client_id") or "").strip()
-    client_secret = (config.get("client_secret") or "").strip()
-    scope = (config.get("scope") or "").strip()
-    if not token_url or not client_id or not client_secret:
-        raise ValueError(f"OAuth configuration is incomplete for MCP server {server.name}")
+    token = str(config.get("access_token") or "").strip()
+    expires_at = config.get("expires_at")
+    expired = False
+    if expires_at:
+        try:
+            expired = int(expires_at) <= int(time.time())
+        except (TypeError, ValueError):
+            expired = False
 
-    data = {"grant_type": "client_credentials"}
-    if scope:
-        data["scope"] = scope
+    if not token or expired:
+        config = await refresh_access_token(config)
+        await cloud_db.update_mcp_server_auth(server.name, "oauth", config)
+        token = str(config.get("access_token") or "").strip()
 
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            token_url,
-            data=data,
-            auth=aiohttp.BasicAuth(client_id, client_secret),
-        ) as response:
-            payload = await response.json(content_type=None)
-            if response.status >= 400:
-                detail = payload.get("error_description") or payload.get("error") or response.reason
-                raise RuntimeError(f"OAuth token request failed ({response.status}): {detail}")
-            token = payload.get("access_token")
-            token_type = payload.get("token_type", "Bearer")
-            if not token:
-                raise RuntimeError("OAuth token response did not contain access_token")
-            return {"Authorization": f"{token_type} {token}"}
+    if not token:
+        raise RuntimeError(f"OAuth authorization is required for MCP server {server.name}")
+
+    token_type = str(config.get("token_type") or "Bearer").strip()
+    return {"Authorization": f"{token_type} {token}"}
 
 
 async def get_default_provider_and_model():

@@ -70,3 +70,9 @@ OWNER_PASSWORD = get_env_or_prompt("OWNER_PASSWORD", is_secret=True)
 
 # Optional: Web panel URL for admin interface (can be empty)
 WEB_PANEL_URL = environ.get("WEB_PANEL_URL", "")
+
+# Public OAuth callback used by MCP Authorization Code flow.
+MCP_OAUTH_REDIRECT_URI = environ.get(
+    "MCP_OAUTH_REDIRECT_URI",
+    "https://serverweb.serv00.net/oauth_callback.php",
+)

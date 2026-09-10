@@ -356,6 +356,16 @@ class LocalDatabase:
             return True
         return False
 
+    async def update_mcp_server_auth(self, name: str, auth_type: str, auth_config: dict):
+        """Update MCP authentication configuration."""
+        server = await self.get_mcp_server_by_name(name)
+        if server:
+            server.auth_type = auth_type
+            server.auth_config = auth_config or {}
+            await self.commit()
+            return True
+        return False
+
     async def update_mcp_server_tools(self, name: str, tools_config: dict):
         """Update tools configuration for MCP server"""
         server = await self.get_mcp_server_by_name(name)
