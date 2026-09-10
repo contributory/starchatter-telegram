@@ -584,10 +584,11 @@ async def _finalize_add_mcp(
         status_icon = "✅" if server_obj and server_obj.enabled else "❌"
         server_names_list.append(f"`{i + 1}`. {status_icon} `{sname}`")
 
+    servers_text = "\n".join(server_names_list)
     list_text = (
         f"{result_text}\n\n---\n"
         f"**🔧 MCP Servers** (Page 1/{total_pages})\n\n"
-        f"{'\n'.join(server_names_list)}\n\n"
+        f"{servers_text}\n\n"
         "Tap a number to manage server."
     )
 
