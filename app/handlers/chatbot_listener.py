@@ -234,7 +234,7 @@ async def _send_error_report(client: Client, chat_id: int) -> bool:
         "⚠️ **Bot Error Report**\n\n"
         f"**Chat:** `{chat_id}`\n\n"
         f"```text\n{error_text}\n```\n\n"
-        "💬 _Reply to this message to send a response to that chat._"
+        "__Reply to this message to send a response to that chat.__"
     )
 
     sent = False
