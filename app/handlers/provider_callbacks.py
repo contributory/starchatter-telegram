@@ -1,5 +1,7 @@
 """Provider callback handler for AI provider management."""
 
+import logging
+
 from pyrogram import Client, enums, filters, types
 from sqlalchemy import select
 
@@ -7,6 +9,7 @@ from app.ai.base import get_provider_models
 from app.database.cloud import cloud_db
 from app.database.local import local_db
 from app.database.models import AIProvider
+from app.handlers import flow_state
 from app.handlers.owner import is_user_owner
 from app.handlers.pagination import (
     ITEMS_PER_PAGE,
@@ -14,9 +17,22 @@ from app.handlers.pagination import (
     create_providers_keyboard,
 )
 
+logger = logging.getLogger(__name__)
+
 # Write to cloud (mirrors to local), read from local (faster)
 write_db = cloud_db
 read_db = local_db
+# In-memory state for the button-driven Add / Edit provider flows.
+# { user_id: { "mode": "add"|"edit", "step": str, "chat_id": int,
+#              "menu_msg_id": int, "provider_id": int | None, ... } }
+_provider_flow: dict = {}
+
+
+async def _get_provider(provider_id: int) -> AIProvider | None:
+    result = await read_db.execute(
+        select(AIProvider).where(AIProvider.id == provider_id)
+    )
+    return result.scalars().first()
 
 
 @Client.on_callback_query(
@@ -64,6 +80,371 @@ async def provider_close_handler(client: Client, callback_query: types.CallbackQ
     await callback_query.answer()
 
 
+# ==================== Add Provider Flow ====================
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/add$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_add_handler(client: Client, callback_query: types.CallbackQuery):
+    """Start the Add Provider flow - ask for the provider name."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+
+    _provider_flow[user_id] = {
+        "mode": "add",
+        "step": "name",
+        "chat_id": chat_id,
+        "menu_msg_id": callback_query.message.id,
+    }
+    # Ignore the user's next text messages in the chatbot listener.
+    flow_state.start_flow(user_id, "provider_add")
+
+    cancel_markup = types.InlineKeyboardMarkup([[
+        types.InlineKeyboardButton(
+            text="❌ Cancel", callback_data="provider/add_cancel"
+        )
+    ]])
+
+    try:
+        await callback_query.message.edit_text(
+            "**➕ Add Provider — Step 1/3**\n\n"
+            "Please send the **provider name** (e.g. `openai`):",
+            reply_markup=cancel_markup,
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+    await callback_query.answer()
+
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/add_cancel$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_add_cancel_handler(client: Client, callback_query: types.CallbackQuery):
+    """Cancel the Add Provider flow."""
+    user_id = callback_query.from_user.id
+    _provider_flow.pop(user_id, None)
+    flow_state.end_flow(user_id)
+    await show_providers_list(client, callback_query.message, 0, force_cloud=False)
+    await callback_query.answer("Cancelled.")
+
+
+# ==================== Edit Provider Flow ====================
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/edit/\d+$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_edit_handler(client: Client, callback_query: types.CallbackQuery):
+    """Show the Edit Provider menu."""
+    await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
+    provider_id = int(str(callback_query.data).split("/")[2])
+    provider = await _get_provider(provider_id)
+    if not provider:
+        await callback_query.answer("Provider not found!", show_alert=True)
+        return
+    await show_provider_edit_menu(client, callback_query.message, provider)
+    await callback_query.answer()
+
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/edit_back/\d+$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_edit_back_handler(client: Client, callback_query: types.CallbackQuery):
+    """Back from the edit menu to provider actions."""
+    provider_id = int(str(callback_query.data).split("/")[2])
+    provider = await _get_provider(provider_id)
+    if not provider:
+        await callback_query.answer("Provider not found!", show_alert=True)
+        return
+    await show_provider_actions(client, callback_query.message, provider)
+    await callback_query.answer()
+
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/edit_field/\d+/(name|url|api_key)$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_edit_field_handler(client: Client, callback_query: types.CallbackQuery):
+    """Start editing a single provider field (name / url / api_key)."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    parts = str(callback_query.data).split("/")
+    provider_id = int(parts[2])
+    field = parts[3]
+
+    provider = await _get_provider(provider_id)
+    if not provider:
+        await callback_query.answer("Provider not found!", show_alert=True)
+        return
+
+    _provider_flow[user_id] = {
+        "mode": "edit",
+        "step": f"edit_{field}",
+        "provider_id": provider_id,
+        "chat_id": chat_id,
+        "menu_msg_id": callback_query.message.id,
+    }
+    flow_state.start_flow(user_id, "provider_edit")
+
+    current_map = {
+        "name": f"Current name: `{provider.name}`",
+        "url": f"Current URL: `{provider.base_url}`",
+        "api_key": f"Current API Key: `{provider.api_key[:10]}...`",
+    }
+    prompt_map = {
+        "name": "Send the **new provider name**:",
+        "url": "Send the **new base URL** (must start with `http://` or `https://`):",
+        "api_key": "Send the **new API key**:",
+    }
+
+    cancel_markup = types.InlineKeyboardMarkup([[
+        types.InlineKeyboardButton(
+            text="❌ Cancel",
+            callback_data=f"provider/edit_cancel/{provider_id}",
+        )
+    ]])
+
+    try:
+        await callback_query.message.edit_text(
+            f"**✏️ Edit Provider — {field.replace('_', ' ').title()}**\n\n"
+            f"{current_map[field]}\n\n{prompt_map[field]}",
+            reply_markup=cancel_markup,
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+    await callback_query.answer()
+
+
+@Client.on_callback_query(
+    filters.regex(r"^provider/edit_cancel/\d+$")
+    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
+)
+async def provider_edit_cancel_handler(client: Client, callback_query: types.CallbackQuery):
+    """Cancel an in-progress field edit and return to the provider actions."""
+    user_id = callback_query.from_user.id
+    provider_id = int(str(callback_query.data).split("/")[2])
+    _provider_flow.pop(user_id, None)
+    flow_state.end_flow(user_id)
+
+    provider = await _get_provider(provider_id)
+    if provider:
+        await show_provider_actions(client, callback_query.message, provider)
+    await callback_query.answer("Cancelled.")
+
+
+# ==================== Provider Flow Conversation (text input) ====================
+
+@Client.on_message(
+    filters.create(lambda _, __, m: (
+        m.from_user is not None
+        and is_user_owner(m.from_user.id)
+        and m.from_user.id in _provider_flow
+        and not (m.text or "").startswith("/")
+    ))  # type: ignore
+)
+async def provider_flow_conversation_handler(client: Client, message: types.Message):
+    """Handle step-by-step Add / Edit provider text input.
+
+    Returns True to stop further handler propagation once the message has
+    been consumed by the flow.
+    """
+    user_id = message.from_user.id
+    state = _provider_flow.get(user_id)
+    if not state:
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        return True
+
+    chat_id = state["chat_id"]
+    menu_msg_id = state["menu_msg_id"]
+    mode = state["mode"]
+
+    # Delete the admin's input message to keep the chat clean.
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    cancel_markup = types.InlineKeyboardMarkup([[
+        types.InlineKeyboardButton(
+            text="❌ Cancel",
+            callback_data=(
+                "provider/add_cancel"
+                if mode == "add"
+                else f"provider/edit_cancel/{state.get('provider_id')}"
+            ),
+        )
+    ]])
+
+    # ---------- ADD FLOW ----------
+    if mode == "add":
+        step = state["step"]
+        if step == "name":
+            state["name"] = text
+            state["step"] = "url"
+            await _safe_edit(
+                client, chat_id, menu_msg_id,
+                "**➕ Add Provider — Step 2/3**\n\n"
+                f"**Name:** `{text}`\n\n"
+                "Now send the **base URL** (e.g. `https://api.openai.com/v1`):",
+                cancel_markup,
+            )
+        elif step == "url":
+            if not (text.startswith("http://") or text.startswith("https://")):
+                await _safe_edit(
+                    client, chat_id, menu_msg_id,
+                    "**➕ Add Provider — Step 2/3**\n\n"
+                    f"**Name:** `{state['name']}`\n\n"
+                    "❌ Invalid URL. Must start with `http://` or `https://`.\n\n"
+                    "Please send a valid URL:",
+                    cancel_markup,
+                )
+                return True
+            state["url"] = text
+            state["step"] = "api_key"
+            await _safe_edit(
+                client, chat_id, menu_msg_id,
+                "**➕ Add Provider — Step 3/3**\n\n"
+                f"**Name:** `{state['name']}`\n"
+                f"**URL:** `{text}`\n\n"
+                "Finally, send the **API key**:",
+                cancel_markup,
+            )
+        elif step == "api_key":
+            await _finalize_add_provider(
+                client, user_id, state, chat_id, menu_msg_id, api_key=text
+            )
+        return True
+
+    # ---------- EDIT FLOW ----------
+    if mode == "edit":
+        provider_id = state["provider_id"]
+        provider = await _get_provider(provider_id)
+        if not provider:
+            _provider_flow.pop(user_id, None)
+            flow_state.end_flow(user_id)
+            await _safe_edit(client, chat_id, menu_msg_id,
+                             "**⚠️ Provider not found.**", None)
+            return True
+
+        step = state["step"]
+        if step == "edit_name":
+            provider.name = text
+        elif step == "edit_url":
+            if not (text.startswith("http://") or text.startswith("https://")):
+                await _safe_edit(
+                    client, chat_id, menu_msg_id,
+                    "**✏️ Edit Provider — URL**\n\n"
+                    "❌ Invalid URL. Must start with `http://` or `https://`.\n\n"
+                    "Please send a valid URL:",
+                    cancel_markup,
+                )
+                return True
+            provider.base_url = text
+        elif step == "edit_api_key":
+            provider.api_key = text
+
+        # Persist the change (cloud + local).
+        try:
+            await write_db.merge(provider)
+        except Exception as e:
+            logger.warning(f"Failed to update provider {provider_id}: {e}")
+
+        _provider_flow.pop(user_id, None)
+        flow_state.end_flow(user_id)
+
+        # Return to the provider actions view.
+        fresh = await _get_provider(provider_id)
+        if fresh:
+            await show_provider_actions(
+                client, _EditProxy(client, chat_id, menu_msg_id), fresh
+            )
+        return True
+
+    return True
+
+
+async def _finalize_add_provider(
+    client: Client,
+    user_id: int,
+    state: dict,
+    chat_id: int,
+    menu_msg_id: int,
+    api_key: str,
+):
+    """Create the provider and refresh the providers list."""
+    name = state["name"]
+    url = state["url"]
+    _provider_flow.pop(user_id, None)
+    flow_state.end_flow(user_id)
+
+    try:
+        provider = AIProvider(name=name, base_url=url, api_key=api_key)
+        await write_db.add(provider)
+        if await read_db.get_default_provider() is None:
+            await write_db.set_default_provider(provider)
+        note = f"✅ Provider `{name}` added!"
+    except Exception as e:
+        note = f"❌ Failed to add provider: `{e}`"
+
+    menu_msg = await client.get_messages(chat_id, menu_msg_id)
+    if menu_msg:
+        await show_providers_list(client, menu_msg, 0, force_cloud=False)
+    else:
+        await _safe_edit(client, chat_id, menu_msg_id, note, None)
+
+async def _safe_edit(
+    client: Client,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: types.InlineKeyboardMarkup | None,
+):
+    """Edit a message by ids, ignoring errors."""
+    try:
+        await client.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
+class _EditProxy:
+    """Minimal message-like object exposing edit_text() for helper functions.
+
+    Used when we only have (chat_id, message_id) and want to reuse helpers
+    such as show_provider_actions() that call ``message.edit_text``.
+    """
+
+    def __init__(self, client: Client, chat_id: int, message_id: int):
+        self._client = client
+        self.chat = None
+        self.chat_id = chat_id
+        self.id = message_id
+        self.text = None
+        self.reply_markup = None
+
+    async def edit_text(self, text, reply_markup=None, parse_mode=None):
+        await self._client.edit_message_text(
+            chat_id=self.chat_id,
+            message_id=self.id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+
+
 @Client.on_callback_query(
     filters.regex(r"^provider/\d+$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
@@ -96,11 +477,7 @@ async def provider_select_handler(client: Client, callback_query: types.Callback
     parts = str(callback_query.data).split("/")
     provider_id = int(parts[2])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -114,40 +491,6 @@ async def provider_select_handler(client: Client, callback_query: types.Callback
 
 
 @Client.on_callback_query(
-    filters.regex(r"^provider/edit/\d+$")
-    & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
-)
-async def provider_edit_handler(client: Client, callback_query: types.CallbackQuery):
-    """Handle provider edit callback"""
-    await callback_query.message.reply_chat_action(enums.ChatAction.TYPING)
-    parts = str(callback_query.data).split("/")
-    provider_id = int(parts[2])
-
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
-    if not provider:
-        await callback_query.answer("Provider not found!", show_alert=True)
-        return
-
-    default_provider = await read_db.get_default_provider()
-    default_tag = (
-        " ⭐ (Default)"
-        if default_provider and provider.id == default_provider.id
-        else ""
-    )
-    await callback_query.answer(
-        f"**Edit Provider: {provider.name}**{default_tag}\n\n"
-        f"URL: `{provider.base_url}`\n"
-        f"API Key: `{provider.api_key[:10]}...`\n\n"
-        f"⚠️ Edit functionality not implemented yet.",
-        show_alert=True,
-    )
-
-
-@Client.on_callback_query(
     filters.regex(r"^provider/delete/\d+$")
     & filters.create(lambda _, __, cq: is_user_owner(cq.from_user.id))  # type: ignore
 )
@@ -157,11 +500,7 @@ async def provider_delete_handler(client: Client, callback_query: types.Callback
     parts = str(callback_query.data).split("/")
     provider_id = int(parts[2])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -181,11 +520,7 @@ async def provider_models_handler(client: Client, callback_query: types.Callback
     parts = str(callback_query.data).split("/")
     provider_id = int(parts[2])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -209,11 +544,7 @@ async def provider_models_page_handler(
     provider_id = int(parts[2])
     page = int(parts[4])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -236,11 +567,7 @@ async def provider_models_back_handler(
     parts = str(callback_query.data).split("/")
     provider_id = int(parts[2])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -264,11 +591,7 @@ async def provider_models_select_handler(
     provider_id = int(parts[1])
     model_index = int(parts[2])
 
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider = result.scalars().first()
-
+    provider = await _get_provider(provider_id)
     if not provider:
         await callback_query.answer("Provider not found!", show_alert=True)
         return
@@ -302,12 +625,24 @@ async def show_providers_list(
         else read_db.get_default_provider()
     )
 
+    add_button_row = [
+        types.InlineKeyboardButton(
+            text="➕ Add Provider", callback_data="provider/add"
+        )
+    ]
+
     if not providers:
+        markup = types.InlineKeyboardMarkup([
+            [add_button_row[0]],
+            [types.InlineKeyboardButton(text="⬅️ Back", callback_data="provider/back")],
+        ])
         try:
             await message.edit_text(
-                "**⚠️ No Providers**\n\n"
-                "Add a provider using:\n"
-                "`/add_provider <name> <base_url> <api_key>`",
+                "**🤖 AI Providers**\n\n"
+                "No providers yet.\n\n"
+                "Tap **➕ Add Provider** to add one, or use\n"
+                "`/add_provider <name> <base_url> <api_key>`.",
+                reply_markup=markup,
             )
         except Exception:
             pass
@@ -326,6 +661,8 @@ async def show_providers_list(
         total_pages=total_pages,
         back_callback="provider/back",
     )
+    # Insert "➕ Add Provider" button at the top
+    markup.inline_keyboard.insert(0, [add_button_row[0]])
 
     start_num = page * ITEMS_PER_PAGE + 1
     provider_names = []
@@ -339,7 +676,7 @@ async def show_providers_list(
     new_text = (
         f"**🤖 AI Providers** (Page {page + 1}/{total_pages})\n\n"
         f"{providers_text}\n\n"
-        f"Tap a number to select provider."
+        f"Tap a number to select, or ➕ to add new provider."
     )
 
     try:
@@ -409,6 +746,44 @@ async def show_provider_actions(
         pass
 
 
+async def show_provider_edit_menu(
+    client: Client, message: types.Message, provider: AIProvider
+):
+    """Display the Edit Provider menu with per-field buttons."""
+    buttons = [
+        [types.InlineKeyboardButton(
+            text=f"🔹 Editing: {provider.name}", callback_data="noop"
+        )],
+        [
+            types.InlineKeyboardButton(
+                text="📝 Name", callback_data=f"provider/edit_field/{provider.id}/name"
+            ),
+            types.InlineKeyboardButton(
+                text="🔗 URL", callback_data=f"provider/edit_field/{provider.id}/url"
+            ),
+        ],
+        [types.InlineKeyboardButton(
+            text="🔑 API Key", callback_data=f"provider/edit_field/{provider.id}/api_key"
+        )],
+        [types.InlineKeyboardButton(
+            text="⬅️ Back", callback_data=f"provider/edit_back/{provider.id}"
+        )],
+    ]
+    markup = types.InlineKeyboardMarkup(buttons)
+
+    new_text = (
+        f"**✏️ Edit Provider: {provider.name}**\n\n"
+        f"**URL:** `{provider.base_url}`\n"
+        f"**API Key:** `{provider.api_key[:10]}...`\n\n"
+        f"Choose a field to edit."
+    )
+    try:
+        if message.text != new_text or str(message.reply_markup) != str(markup):
+            await message.edit_text(new_text, reply_markup=markup)
+    except Exception:
+        pass
+
+
 async def show_provider_models(
     client: Client,
     message: types.Message,
@@ -417,10 +792,7 @@ async def show_provider_models(
     page: int,
 ):
     """Display models list of a provider with pagination using edit_text."""
-    result = await read_db.execute(
-        select(AIProvider).where(AIProvider.id == provider_id)
-    )
-    provider_object = result.scalars().first()
+    provider_object = await _get_provider(provider_id)
 
     if not provider_object:
         buttons = [

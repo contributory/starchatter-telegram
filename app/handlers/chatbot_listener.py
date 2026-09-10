@@ -9,6 +9,7 @@ from app.ai.agent import AIAgent
 from app.database.cloud import cloud_db
 from app.database.local import local_db
 from app.handlers.owner import is_user_owner
+from app.handlers import flow_state
 from pyrogram import Client, enums, filters, types
 from pyrogram.errors import MessageNotModified, BadRequest
 
@@ -157,14 +158,34 @@ async def safe_reply(message: types.Message, text: str, reply_markup=None):
         return False
 
 
+def _is_admin_flow_message(_, __, message) -> bool:
+    """True when the sender is inside an active admin input flow.
+
+    Such messages (e.g. typing the server name during Add MCP Server or the
+    new URL during Edit Provider) belong to the flow handler, not the AI.
+    """
+    user = getattr(message, "from_user", None)
+    return bool(user and flow_state.is_in_flow(user.id))
+
+
 @Client.on_message(
     (filters.mentioned & ~filters.new_chat_members | filters.private)
     & filters.incoming
     & ~filters.create(lambda _, __, m: m.text and m.text.startswith("/"))  # type: ignore
     & ~filters.create(_is_error_report_reply)  # type: ignore
+    & ~filters.create(_is_admin_flow_message)  # type: ignore
 )
 async def chatbot_handler(client: Client, message: types.Message):
     """Process chatbot message with improved error handling."""
+    # Defensive guard: never let the AI process messages that belong to an
+    # active admin input flow (Add/Edit Provider, Add MCP, ...).
+    if message.from_user and flow_state.is_in_flow(message.from_user.id):
+        logger.info(
+            f"Skipping AI processing for user {message.from_user.id} "
+            f"(active flow: {flow_state.get_flow(message.from_user.id)})"
+        )
+        return
+
     chat_id = message.chat.id
     chat_type = message.chat.type
     user_info = (
