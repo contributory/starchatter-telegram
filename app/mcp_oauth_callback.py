@@ -60,7 +60,7 @@ def mcp_oauth_callback(
 
     return HTMLResponse(
         "<h2>OAuth authorization received ✅</h2>"
-        "<p>Return to Telegram and press <strong>Check Authorization</strong>.</p>"
+        "<p>You can return to Telegram now. The bot will detect this automatically.</p>"
     )
 
 

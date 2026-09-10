@@ -1,5 +1,6 @@
 """MCP server callback handlers - full button-based management."""
 
+import asyncio
 import json
 import secrets
 import tempfile
@@ -23,6 +24,145 @@ read_db = local_db
 # In-memory state machine for add MCP flow
 # { user_id: { "step": "name"|"url"|"desc", "name": str, "url": str, "msg_id": int, "chat_id": int } }
 _add_mcp_state: dict = {}
+
+# Automatic OAuth callback polling. The manual Check Authorization button remains
+# available as a fallback if a poller times out or is interrupted by a restart.
+_OAUTH_POLL_INTERVAL_SECONDS = 2
+_OAUTH_POLL_TIMEOUT_SECONDS = 300
+_oauth_poll_tasks: dict[int, asyncio.Task] = {}
+
+
+def _cancel_oauth_poll(user_id: int) -> None:
+    task = _oauth_poll_tasks.pop(user_id, None)
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def _process_oauth_callback(client: Client, user_id: int, state: dict) -> str:
+    """Consume one OAuth callback if present and finish the MCP add flow."""
+    if state.get("oauth_processing"):
+        return "processing"
+
+    oauth_state = str(state.get("oauth_state") or "")
+    callback_file = _oauth_callback_path(oauth_state)
+    if not callback_file.exists():
+        return "pending"
+
+    # No await occurs between the guard and this flag, so the poller and manual
+    # button cannot both consume the same callback on this event loop.
+    state["oauth_processing"] = True
+    try:
+        try:
+            payload = json.loads(callback_file.read_text())
+        except Exception as exc:
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text=f"**❌ Invalid OAuth Callback**\n\n`{exc}`",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+        finally:
+            try:
+                callback_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if payload.get("state") != oauth_state:
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text="**❌ OAuth State Mismatch**\n\nGenerate a new OAuth link and try again.",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+
+        if payload.get("error"):
+            detail = payload.get("error_description") or payload.get("error")
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text=f"**❌ OAuth Authorization Failed**\n\n`{detail}`",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 Try Again", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+
+        code = str(payload.get("code") or "")
+        if not code:
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text="**❌ OAuth Callback Missing Code**\n\nGenerate a new OAuth link and try again.",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+
+        try:
+            state["auth_config"] = await exchange_authorization_code(
+                state["auth_config"],
+                code=code,
+                code_verifier=state["oauth_code_verifier"],
+                redirect_uri=MCP_OAUTH_REDIRECT_URI,
+            )
+        except Exception as exc:
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text=f"**❌ OAuth Token Exchange Failed**\n\n`{exc}`",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+
+        await _save_mcp_server(client, user_id, state, state["chat_id"])
+        return "success"
+    finally:
+        state.pop("oauth_processing", None)
+
+
+async def _poll_oauth_callback(client: Client, user_id: int, oauth_state: str) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _OAUTH_POLL_TIMEOUT_SECONDS
+    try:
+        while loop.time() < deadline:
+            await asyncio.sleep(_OAUTH_POLL_INTERVAL_SECONDS)
+            state = _add_mcp_state.get(user_id)
+            if (
+                not state
+                or state.get("step") != "oauth_wait"
+                or state.get("oauth_state") != oauth_state
+            ):
+                return
+
+            result = await _process_oauth_callback(client, user_id, state)
+            if result not in {"pending", "processing"}:
+                return
+    except asyncio.CancelledError:
+        return
+    finally:
+        if _oauth_poll_tasks.get(user_id) is asyncio.current_task():
+            _oauth_poll_tasks.pop(user_id, None)
+
+
+def _start_oauth_poll(client: Client, user_id: int, oauth_state: str) -> None:
+    _cancel_oauth_poll(user_id)
+    _oauth_poll_tasks[user_id] = asyncio.create_task(
+        _poll_oauth_callback(client, user_id, oauth_state)
+    )
 
 
 # ==================== Pagination ====================
@@ -280,7 +420,11 @@ async def _show_description_step(client: Client, state: dict):
     )
 
 
-async def _show_oauth_authorize_step(client: Client, state: dict, *, reset: bool = False):
+async def _show_oauth_authorize_step(
+    client: Client, user_id: int, state: dict, *, reset: bool = False
+):
+    # Stop any previous poller before rotating OAuth state or touching auth config.
+    _cancel_oauth_poll(user_id)
     config = state["auth_config"]
     if reset or not state.get("oauth_state") or not state.get("oauth_code_verifier"):
         old_state = state.get("oauth_state")
@@ -303,6 +447,7 @@ async def _show_oauth_authorize_step(client: Client, state: dict, *, reset: bool
         scope=config.get("scope", ""),
     )
     state["step"] = "oauth_wait"
+    state.pop("oauth_processing", None)
 
     markup = types.InlineKeyboardMarkup([
         [types.InlineKeyboardButton(text="🔐 Authorize OAuth2", url=authorization_url)],
@@ -318,13 +463,15 @@ async def _show_oauth_authorize_step(client: Client, state: dict, *, reset: bool
             "**🔐 OAuth2 Authorization Required**\n\n"
             f"MCP Server: `{state['name']}`\n\n"
             "Press **Authorize OAuth2** to open the provider's login/consent page. "
-            "After authorization returns successfully, come back here and press "
-            "**Check Authorization**.\n\n"
+            "After authorization returns successfully, the bot will detect it "
+            "automatically — no extra button press is required.\n\n"
+            "**Check Authorization** remains available as a manual fallback.\n\n"
             f"Redirect URI: `{MCP_OAUTH_REDIRECT_URI}`"
         ),
         reply_markup=markup,
         parse_mode=enums.ParseMode.MARKDOWN,
     )
+    _start_oauth_poll(client, user_id, state["oauth_state"])
 
 
 @Client.on_callback_query(
@@ -334,6 +481,7 @@ async def _show_oauth_authorize_step(client: Client, state: dict, *, reset: bool
 async def mcp_add_handler(client: Client, callback_query: types.CallbackQuery):
     """Start add MCP server flow."""
     user_id = callback_query.from_user.id
+    _cancel_oauth_poll(user_id)
     _add_mcp_state[user_id] = {
         "step": "name",
         "chat_id": callback_query.message.chat.id,
@@ -358,6 +506,7 @@ async def mcp_add_handler(client: Client, callback_query: types.CallbackQuery):
 )
 async def mcp_add_cancel_handler(client: Client, callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
+    _cancel_oauth_poll(user_id)
     state = _add_mcp_state.pop(user_id, None)
     if state and state.get("oauth_state"):
         try:
@@ -380,6 +529,8 @@ async def mcp_add_back_handler(client: Client, callback_query: types.CallbackQue
         await callback_query.answer("Session expired.", show_alert=True)
         return
     target = str(callback_query.data).rsplit("/", 1)[-1]
+    if state.get("step") == "oauth_wait":
+        _cancel_oauth_poll(user_id)
     if target == "url":
         state["step"] = "url"
         await callback_query.message.edit_text(
@@ -634,7 +785,7 @@ async def mcp_oauth_new_link_handler(client: Client, callback_query: types.Callb
     if not state or state.get("step") != "oauth_wait":
         await callback_query.answer("Session expired.", show_alert=True)
         return
-    await _show_oauth_authorize_step(client, state, reset=True)
+    await _show_oauth_authorize_step(client, callback_query.from_user.id, state, reset=True)
     await callback_query.answer("New OAuth link generated.")
 
 
@@ -649,64 +800,15 @@ async def mcp_oauth_check_handler(client: Client, callback_query: types.Callback
         await callback_query.answer("Session expired.", show_alert=True)
         return
 
-    oauth_state = state.get("oauth_state", "")
-    callback_file = _oauth_callback_path(oauth_state)
-    if not callback_file.exists():
+    result = await _process_oauth_callback(client, user_id, state)
+    if result == "pending":
         await callback_query.answer("OAuth callback has not arrived yet.", show_alert=True)
-        return
-
-    try:
-        payload = json.loads(callback_file.read_text())
-    except Exception as exc:
-        await callback_query.answer(f"Invalid OAuth callback: {exc}", show_alert=True)
-        return
-    finally:
-        try:
-            callback_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    if payload.get("state") != oauth_state:
-        await callback_query.answer("OAuth state mismatch. Generate a new link.", show_alert=True)
-        return
-
-    if payload.get("error"):
-        detail = payload.get("error_description") or payload.get("error")
-        await callback_query.message.edit_text(
-            f"**❌ OAuth Authorization Failed**\n\n`{detail}`",
-            reply_markup=types.InlineKeyboardMarkup([
-                [types.InlineKeyboardButton(text="🔄 Try Again", callback_data="admin:mcp/oauth_new_link")],
-                [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
-            ]),
-        )
+    elif result == "processing":
+        await callback_query.answer("OAuth authorization is being processed.")
+    elif result == "success":
+        await callback_query.answer("OAuth authorized successfully.")
+    else:
         await callback_query.answer()
-        return
-
-    code = str(payload.get("code") or "")
-    if not code:
-        await callback_query.answer("OAuth callback did not contain an authorization code.", show_alert=True)
-        return
-
-    try:
-        state["auth_config"] = await exchange_authorization_code(
-            state["auth_config"],
-            code=code,
-            code_verifier=state["oauth_code_verifier"],
-            redirect_uri=MCP_OAUTH_REDIRECT_URI,
-        )
-    except Exception as exc:
-        await callback_query.message.edit_text(
-            f"**❌ OAuth Token Exchange Failed**\n\n`{exc}`",
-            reply_markup=types.InlineKeyboardMarkup([
-                [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
-                [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
-            ]),
-        )
-        await callback_query.answer()
-        return
-
-    await _save_mcp_server(client, user_id, state, state["chat_id"], message=callback_query.message)
-    await callback_query.answer("OAuth authorized successfully.")
 
 
 async def _finalize_add_mcp(
@@ -718,7 +820,7 @@ async def _finalize_add_mcp(
 ):
     """Authorize OAuth when needed, otherwise save the MCP server."""
     if state.get("auth_type") == "oauth" and not state.get("auth_config", {}).get("access_token"):
-        await _show_oauth_authorize_step(client, state)
+        await _show_oauth_authorize_step(client, user_id, state)
         return
     await _save_mcp_server(client, user_id, state, chat_id, message=message)
 
@@ -737,6 +839,7 @@ async def _save_mcp_server(
     auth_type = state.get("auth_type", "none")
     auth_config = state.get("auth_config") or {}
     menu_msg_id = state["menu_msg_id"]
+    _cancel_oauth_poll(user_id)
     _add_mcp_state.pop(user_id, None)
     flow_state.end_flow(user_id)
 
