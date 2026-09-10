@@ -158,7 +158,7 @@ async def show_providers_for_feature(
             await message.edit_text(
                 "**⚠️ No Providers**\n\n"
                 "Add a provider first:\n"
-                "`/providers`",
+                "/providers",
             )
         except Exception:
             pass

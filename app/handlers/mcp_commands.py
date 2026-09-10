@@ -28,9 +28,9 @@ async def add_mcp_handler(client: Client, message: types.Message):
     
     if len(args) < 4:
         await message.reply(
-            "❌ **Usage:** `/add_mcp <name> <url> [description]`\n\n"
+            "❌ **Usage:** /add_mcp <name> <url> [description]\n\n"
             "Example:\n"
-            "`/add_mcp MyTools https://example.com/mcp/sse \"My custom tools\"`",
+            "/add_mcp MyTools https://example.com/mcp/sse \"My custom tools\"",
             quote=True,
             parse_mode=enums.ParseMode.MARKDOWN,
         )
@@ -96,11 +96,11 @@ async def toggle_mcp_handler(client: Client, message: types.Message):
     
     if len(args) < 2:
         await message.reply(
-            "❌ **Usage:** `/toggle_mcp <name> [on|off]`\n\n"
+            "❌ **Usage:** /toggle_mcp <name> [on|off]\n\n"
             "Examples:\n"
-            "`/toggle_mcp MyTools` - Toggle on/off\n"
-            "`/toggle_mcp MyTools off` - Disable\n"
-            "`/toggle_mcp MyTools on` - Enable",
+            "/toggle_mcp MyTools - Toggle on/off\n"
+            "/toggle_mcp MyTools off - Disable\n"
+            "/toggle_mcp MyTools on - Enable",
             quote=True,
             parse_mode=enums.ParseMode.MARKDOWN,
         )
@@ -154,9 +154,9 @@ async def delete_mcp_handler(client: Client, message: types.Message):
     
     if len(args) < 2:
         await message.reply(
-            "❌ **Usage:** `/delete_mcp <name>`\n\n"
+            "❌ **Usage:** /delete_mcp <name>\n\n"
             "Example:\n"
-            "`/delete_mcp MyTools`",
+            "/delete_mcp MyTools",
             quote=True,
             parse_mode=enums.ParseMode.MARKDOWN,
         )
