@@ -8,8 +8,14 @@ from pathlib import Path
 
 from pyrogram import Client, enums, filters, types
 
-from app.ai.mcp_oauth import build_authorization_url, create_pkce_pair, exchange_authorization_code
-from app.config import MCP_OAUTH_REDIRECT_URI
+from app.ai.mcp_oauth import (
+    OAuthDiscoveryError,
+    build_authorization_url,
+    create_pkce_pair,
+    discover_mcp_oauth,
+    exchange_authorization_code,
+)
+from app.config import MCP_OAUTH_CLIENT_METADATA_URI, MCP_OAUTH_REDIRECT_URI
 from app.database.cloud import cloud_db
 from app.database.local import local_db
 from app.database.models import MCPServer
@@ -76,6 +82,25 @@ async def _process_oauth_callback(client: Client, user_id: int, state: dict) -> 
                 chat_id=state["chat_id"],
                 message_id=state["menu_msg_id"],
                 text="**❌ OAuth State Mismatch**\n\nGenerate a new OAuth link and try again.",
+                reply_markup=types.InlineKeyboardMarkup([
+                    [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
+                    [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
+                ]),
+            )
+            return "error"
+
+        config = state.get("auth_config") or {}
+        expected_issuer = str(config.get("authorization_server") or "")
+        response_issuer = str(payload.get("iss") or "")
+        issuer_required = bool(config.get("authorization_response_iss_parameter_supported"))
+        if expected_issuer and (
+            (response_issuer and response_issuer != expected_issuer)
+            or (issuer_required and not response_issuer)
+        ):
+            await client.edit_message_text(
+                chat_id=state["chat_id"],
+                message_id=state["menu_msg_id"],
+                text="**❌ OAuth Issuer Validation Failed**\n\nGenerate a new OAuth link and try again.",
                 reply_markup=types.InlineKeyboardMarkup([
                     [types.InlineKeyboardButton(text="🔄 New OAuth Link", callback_data="admin:mcp/oauth_new_link")],
                     [types.InlineKeyboardButton(text="⬅️ Back", callback_data="admin:mcp/add_back/auth")],
@@ -384,18 +409,84 @@ def _oauth_callback_path(oauth_state: str) -> Path:
 
 async def _show_auth_choice(client: Client, state: dict):
     state["step"] = "auth_select"
+    discovery_note = state.pop("oauth_discovery_note", "")
+    note = f"\n\n_{discovery_note}_" if discovery_note else ""
     await client.edit_message_text(
         chat_id=state["chat_id"],
         message_id=state["menu_msg_id"],
         text=(
             "**➕ Add MCP Server — Authentication**\n\n"
             f"**Name:** `{state['name']}`\n"
-            f"**URL:** `{state['url']}`\n\n"
-            "Choose the authentication required by this MCP server:"
+            f"**URL:** `{state['url']}`"
+            f"{note}\n\n"
+            "Choose a fallback authentication method:"
         ),
         reply_markup=_auth_markup(),
         parse_mode=enums.ParseMode.MARKDOWN,
     )
+
+
+async def _auto_discover_mcp_auth(client: Client, user_id: int, state: dict):
+    """Discover standard MCP OAuth metadata and registration automatically."""
+    state["step"] = "auth_discovery"
+    await client.edit_message_text(
+        chat_id=state["chat_id"],
+        message_id=state["menu_msg_id"],
+        text=(
+            "**🔎 Detecting MCP Authentication...**\n\n"
+            f"**Name:** `{state['name']}`\n"
+            f"**URL:** `{state['url']}`\n\n"
+            "Checking the MCP protected-resource and OAuth metadata."
+        ),
+        reply_markup=_cancel_markup("admin:mcp/add_back/url"),
+        parse_mode=enums.ParseMode.MARKDOWN,
+    )
+
+    try:
+        config = await discover_mcp_oauth(
+            state["url"],
+            redirect_uri=MCP_OAUTH_REDIRECT_URI,
+            client_metadata_uri=MCP_OAUTH_CLIENT_METADATA_URI,
+        )
+    except OAuthDiscoveryError as exc:
+        state["oauth_discovery_note"] = f"OAuth metadata was found but automatic discovery failed: {exc}"
+        await _show_auth_choice(client, state)
+        return
+    except Exception as exc:
+        state["oauth_discovery_note"] = f"Automatic auth discovery failed: {exc}"
+        await _show_auth_choice(client, state)
+        return
+
+    if not config:
+        state["oauth_discovery_note"] = "No standard MCP OAuth metadata was found automatically."
+        await _show_auth_choice(client, state)
+        return
+
+    state["auth_type"] = "oauth"
+    state["auth_config"] = config
+
+    if not config.get("client_id"):
+        state["step"] = "oauth_client_id"
+        registration_error = bool(config.get("registration_error"))
+        extra = "\n\nDynamic client registration was unavailable or failed." if registration_error else ""
+        await client.edit_message_text(
+            chat_id=state["chat_id"],
+            message_id=state["menu_msg_id"],
+            text=(
+                "**🔐 OAuth2 Detected Automatically**\n\n"
+                f"Authorization server: `{config.get('authorization_server', '')}`\n"
+                f"Authorization endpoint: `{config.get('authorization_url', '')}`\n"
+                f"Token endpoint: `{config.get('token_url', '')}`"
+                f"{extra}\n\n"
+                "This authorization server does not support an automatic client registration method "
+                "that Starchatter can use. Send the pre-registered **client_id**:"
+            ),
+            reply_markup=_cancel_markup("admin:mcp/add_back/auth"),
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
+        return
+
+    await _show_description_step(client, state)
 
 
 async def _show_description_step(client: Client, state: dict):
@@ -445,6 +536,7 @@ async def _show_oauth_authorize_step(
         state=state["oauth_state"],
         code_challenge=state["oauth_code_challenge"],
         scope=config.get("scope", ""),
+        resource=config.get("resource", ""),
     )
     state["step"] = "oauth_wait"
     state.pop("oauth_processing", None)
@@ -649,7 +741,7 @@ async def mcp_add_conversation_handler(client: Client, message: types.Message):
             )
             return True
         state["url"] = text
-        await _show_auth_choice(client, state)
+        await _auto_discover_mcp_auth(client, user_id, state)
 
     elif step == "bearer_token":
         state["auth_config"] = {"token": text}
@@ -703,7 +795,10 @@ async def mcp_add_conversation_handler(client: Client, message: types.Message):
 
     elif step == "oauth_client_secret":
         state["auth_config"]["client_secret"] = text
-        await _show_oauth_scope_step(client, state)
+        if state["auth_config"].get("discovered"):
+            await _show_description_step(client, state)
+        else:
+            await _show_oauth_scope_step(client, state)
 
     elif step == "oauth_scope":
         state["auth_config"]["scope"] = text
@@ -741,7 +836,10 @@ async def mcp_add_skip_client_secret_handler(client: Client, callback_query: typ
         await callback_query.answer("Session expired.", show_alert=True)
         return
     state["auth_config"]["client_secret"] = ""
-    await _show_oauth_scope_step(client, state)
+    if state["auth_config"].get("discovered"):
+        await _show_description_step(client, state)
+    else:
+        await _show_oauth_scope_step(client, state)
     await callback_query.answer()
 
 

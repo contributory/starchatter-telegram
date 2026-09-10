@@ -15,10 +15,25 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
+
+
+@router.get("/oauth/client-metadata.json", response_class=JSONResponse, include_in_schema=False)
+def mcp_oauth_client_metadata():
+    client_id = "https://starchatter.serverweb.serv00.net/oauth/client-metadata.json"
+    redirect_uri = "https://starchatter.serverweb.serv00.net/oauth_callback.php"
+    return {
+        "client_id": client_id,
+        "client_name": "Starchatter Telegram Bot",
+        "client_uri": "https://starchatter.serverweb.serv00.net",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    }
 
 
 def _callback_dir() -> Path:
@@ -31,6 +46,7 @@ def mcp_oauth_callback(
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
     error_description: str | None = Query(default=None),
+    iss: str | None = Query(default=None),
 ):
     if not _STATE_RE.fullmatch(state):
         return HTMLResponse("<h2>Invalid OAuth state.</h2>", status_code=400)
@@ -40,6 +56,7 @@ def mcp_oauth_callback(
         "code": code,
         "error": error,
         "error_description": error_description,
+        "iss": iss,
         "created_at": int(time.time()),
     }
 

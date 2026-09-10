@@ -76,3 +76,8 @@ MCP_OAUTH_REDIRECT_URI = environ.get(
     "MCP_OAUTH_REDIRECT_URI",
     "https://starchatter.serverweb.serv00.net/oauth_callback.php",
 )
+
+MCP_OAUTH_CLIENT_METADATA_URI = environ.get(
+    "MCP_OAUTH_CLIENT_METADATA_URI",
+    "https://starchatter.serverweb.serv00.net/oauth/client-metadata.json",
+)
